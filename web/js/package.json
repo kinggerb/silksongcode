@@ -1,0 +1,4 @@
+{
+  "//": "The loader modules are UMD: the page loads them with plain <script> tags, the tests require() them from Node. Marking this folder CommonJS keeps require() working even though the parent package is an ES module.",
+  "type": "commonjs"
+}

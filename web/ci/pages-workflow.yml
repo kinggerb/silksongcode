@@ -1,0 +1,75 @@
+# GitHub Actions workflow that publishes the web port to GitHub Pages.
+#
+# It lives here rather than in .github/workflows/ on purpose: moving a file into
+# .github/workflows/ needs extra repository permissions that an automation token
+# may not have, so this file is a template you copy into place once:
+#
+#   mkdir -p .github/workflows && cp web/ci/pages-workflow.yml .github/workflows/web.yml
+#
+# Publishes the web port to GitHub Pages.
+#
+# The prepared Unity build is NOT in this repository (it is hundreds of MB and
+# is game data). This workflow publishes the page plus whatever is in web/Build
+# at the time it runs — so either commit a build into web/Build locally, drop it
+# in from a release/artifact, or point the page at a CDN with `?base=`.
+#
+# Pages must be enabled once: Settings ▸ Pages ▸ Source = "GitHub Actions".
+
+name: web
+
+on:
+  push:
+    branches: [main]
+    paths: ['web/**', '.github/workflows/web.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install test dependencies
+        run: npm ci
+        working-directory: web
+      - name: Run the suites
+        run: npm test
+        working-directory: web
+      - name: Check the published page is complete
+        run: node tools/verify-build.mjs --quick || true
+        working-directory: web
+
+  publish:
+    needs: test
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Stage the boss-rush roster
+        run: node web/tools/stage-boss-scenes.mjs
+      - name: Assemble the site
+        run: |
+          mkdir -p site
+          cp -r web/. site/
+          rm -rf site/node_modules site/tools site/.fixture-build site/package.json site/package-lock.json
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - id: deploy
+        uses: actions/deploy-pages@v4

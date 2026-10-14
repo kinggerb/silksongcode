@@ -1,0 +1,24 @@
+{
+  "name": "silksong-web",
+  "private": true,
+  "version": "1.0.0",
+  "description": "iPad/Safari web port front-end for the Silksong RL repo: chunk streaming, OPFS cache, build pipeline",
+  "type": "module",
+  "scripts": {
+    "test": "node tools/test-all.mjs",
+    "serve": "node tools/serve.mjs",
+    "fixture": "node tools/make-fixture-build.mjs",
+    "prepare-build": "node tools/prepare-build.mjs",
+    "verify-build": "node tools/verify-build.mjs",
+    "stage-boss-scenes": "node tools/stage-boss-scenes.mjs",
+    "test:stream": "node tools/test-stream.mjs",
+    "test:manifest": "node tools/test-manifest.mjs",
+    "test:webdata": "node tools/test-webdata.mjs",
+    "test:save-codec": "node tools/test-save-codec.mjs",
+    "test:pipeline": "node tools/test-pipeline.mjs",
+    "test:page": "node tools/test-page.mjs"
+  },
+  "devDependencies": {
+    "jsdom": "^30.1.2"
+  }
+}

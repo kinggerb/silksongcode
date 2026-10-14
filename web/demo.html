@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<title>Silksong web port — loader self-test</title>
+<style>
+  :root{--fg:#e8e8ef;--dim:#9a9aa8;--ok:#9dffb0;--warn:#ffd479;--bad:#ff9d9d}
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{
+    min-height:100vh;background:radial-gradient(ellipse at 50% 0%,#16161f 0%,#05050a 70%);color:var(--fg);
+    font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;
+    padding:clamp(16px,5vw,48px);display:flex;flex-direction:column;align-items:center;gap:18px
+  }
+  main{width:min(760px,100%);display:flex;flex-direction:column;gap:16px}
+  h1{font-weight:300;font-size:clamp(22px,5vw,32px);letter-spacing:.05em}
+  h1 small{display:block;font-size:.4em;letter-spacing:.2em;text-transform:uppercase;color:var(--dim);margin-top:8px}
+  section{border:1px solid rgba(255,255,255,.14);border-radius:14px;padding:14px 16px;background:rgba(255,255,255,.03)}
+  h2{font-size:11px;letter-spacing:.18em;text-transform:uppercase;color:var(--dim);margin-bottom:8px}
+  .row{display:flex;justify-content:space-between;gap:12px;padding:3px 0;border-bottom:1px dotted rgba(255,255,255,.08);font-size:13px}
+  .row:last-child{border-bottom:0}
+  .row span:last-child{text-align:right;color:#cfcfe0;word-break:break-word}
+  button{
+    appearance:none;background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.22);color:#fff;border-radius:10px;
+    padding:9px 14px;font-size:14px;cursor:pointer;margin:6px 6px 0 0
+  }
+  button:active{background:rgba(255,255,255,.24)}
+  button[disabled]{opacity:.45;cursor:default}
+  #bar{height:8px;border-radius:5px;background:rgba(255,255,255,.08);overflow:hidden;margin:10px 0 6px}
+  #bar i{display:block;height:100%;width:0;background:linear-gradient(90deg,#7c3aed,#d8b4fe);transition:width .15s}
+  #status{font-size:13px;color:var(--dim);min-height:20px}
+  #log{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10.5px;white-space:pre-wrap;
+    max-height:240px;overflow:auto;background:rgba(0,0,0,.35);border-radius:8px;padding:8px}
+  .ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}
+  a{color:#d8b4fe}
+</style>
+</head>
+<body>
+<main>
+  <h1>Loader self-test<small>Silksong web port &middot; what this device can do</small></h1>
+
+  <section>
+    <h2>Capabilities</h2>
+    <div id="caps"></div>
+  </section>
+
+  <section>
+    <h2>Game build</h2>
+    <div id="build"></div>
+  </section>
+
+  <section>
+    <h2>Chunk pipeline</h2>
+    <div id="bar"><i></i></div>
+    <div id="status">Ready.</div>
+    <button id="run">Run the test (24 MB in 12 chunks)</button>
+    <button id="rerun">Run again — expect "cache hit"</button>
+    <button id="clear">Clear cached test data</button>
+    <button id="tamper">Simulate a broken chunk</button>
+    <div id="log" style="margin-top:12px"></div>
+  </section>
+
+  <p style="color:var(--dim);font-size:13px">
+    This page exercises the same code path the game uses (<code>js/stream.js</code> +
+    <code>js/writer.js</code>) with synthetic chunks, so it works without the game build.
+    The real game page is <a href="play.html">play.html</a>; the build pipeline is documented in
+    <a href="BUILD.md">BUILD.md</a>.
+  </p>
+</main>
+
+<script src="js/stream.js"></script>
+<script src="js/manifest.js"></script>
+<script src="js/save-codec.js"></script>
+<script>
+/* ============================================================================
+ * demo.html — a self-test for the loading machinery
+ * ----------------------------------------------------------------------------
+ * Everything here is the production code path: the same chunk list format, the
+ * same OPFS worker, the same verification, the same cache markers. Only the
+ * chunks are generated in the page instead of coming from the game build, so it
+ * runs anywhere (and is what the iPad checklist in IPAD.md tells you to open
+ * first if the game will not boot).
+ * ==========================================================================*/
+(function () {
+  'use strict';
+  var $ = function (id) { return document.getElementById(id); };
+  var bar = $('bar').firstElementChild;
+  var lines = [];
+  var cacheKey = 'loader-selftest.bin';
+  var buildId = 'selftest-v1';
+
+  function log() {
+    var parts = [];
+    for (var i = 0; i < arguments.length; i++) parts.push(String(arguments[i]));
+    lines.push(parts.join(' '));
+    if (lines.length > 300) lines.shift();
+    $('log').textContent = lines.slice(-120).join('\n');
+  }
+  function status(text, cls) {
+    $('status').textContent = text;
+    $('status').className = cls || '';
+  }
+  function progress(fraction) {
+    bar.style.width = Math.max(0, Math.min(1, fraction)) * 100 + '%';
+  }
+  function row(host, name, value) {
+    var div = document.createElement('div');
+    div.className = 'row';
+    var a = document.createElement('span');
+    a.textContent = name;
+    var b = document.createElement('span');
+    b.textContent = value;
+    div.appendChild(a);
+    div.appendChild(b);
+    host.appendChild(div);
+  }
+
+  /* ---------------------------------------------------------------- *
+   * Capabilities
+   * ---------------------------------------------------------------- */
+  SKStream.detect().then(function (caps) {
+    var host = $('caps');
+    row(host, 'private file system (OPFS)', caps.opfs ? 'yes' : 'no — ' + (caps.opfsError || 'unavailable'));
+    row(host, 'storage quota', caps.quota ? SKStream.mb(caps.quota) : 'unknown');
+    row(host, 'already used by this site', SKStream.mb(caps.usage || 0));
+    row(host, 'free for the game data', caps.available ? SKStream.mb(caps.available) : 'unknown');
+    row(host, 'web workers', caps.workers ? 'yes' : 'no (writes fall back to the main thread)');
+    row(host, 'secure context', caps.secure ? 'yes' : 'no — iOS needs https for OPFS');
+    row(host, 'device memory hint', caps.deviceMemoryGb ? caps.deviceMemoryGb + ' GB' : 'not reported (Safari never does)');
+    log('capabilities', JSON.stringify(caps));
+  });
+
+  SKStream.requestPersistence().then(function (granted) {
+    log('persistent storage granted: ' + granted);
+  });
+
+  /* ---------------------------------------------------------------- *
+   * Is a prepared game build next to this page?
+   * ---------------------------------------------------------------- */
+  SKManifest.load({ log: log }).then(function (manifest) {
+    var host = $('build');
+    var kind = manifest.kind === 'manifest' ? 'prepared' : manifest.kind;
+    row(host, 'manifest', kind + (manifest.problems && manifest.problems.length ? ' — ' + manifest.problems.join('; ') : ''));
+    row(host, 'build id', manifest.buildId);
+    Object.keys(manifest.datasets || {}).forEach(function (key) {
+      var set = manifest.datasets[key];
+      row(host, key, SKStream.mb(set.total) + ' in ' + (set.parts || []).length + ' chunks');
+    });
+    if (!Object.keys(manifest.datasets || {}).length) {
+      row(host, 'datasets', 'none — run web/tools/prepare-build.mjs to add the real game data');
+    }
+    if (manifest.kind !== 'fallback') {
+      SKManifest.checkBuild(manifest).then(function (report) {
+        row(host, 'chunk check', report.ok ? 'all chunks present' : 'problems: ' + JSON.stringify(report.datasets).slice(0, 120));
+        Object.keys(report.datasets).forEach(function (key) {
+          if (!report.datasets[key].ok) log('bad chunks in ' + key + ':', report.datasets[key].bad.slice(0, 3));
+        });
+      });
+    }
+  });
+
+  /* ---------------------------------------------------------------- *
+   * Synthetic chunks: a real OPFS stream through the real code
+   * ---------------------------------------------------------------- */
+  var CHUNK_BYTES = 2 * 1024 * 1024;
+  var CHUNKS = 12;
+  var TOTAL = CHUNK_BYTES * CHUNKS;
+  var broken = { part: -1 };
+  var urls = [];
+
+  function makeChunks() {
+    urls.forEach(function (u) { try { URL.revokeObjectURL(u); } catch (e) {} });
+    urls = [];
+    var parts = [];
+    for (var i = 0; i < CHUNKS; i++) {
+      var bytes = new Uint8Array(CHUNK_BYTES);
+      // A recognisable pattern, so a corrupt chunk is obvious in the digest.
+      for (var j = 0; j < bytes.length; j += 4096) bytes[j] = (i * 31 + j / 4096) & 0xff;
+      var length = i === broken.part ? CHUNK_BYTES - 977 : CHUNK_BYTES;
+      var blob = new Blob([bytes.subarray(0, length)], { type: 'application/octet-stream' });
+      var url = URL.createObjectURL(blob);
+      urls.push(url);
+      parts.push({ url: url, bytes: CHUNK_BYTES });
+    }
+    return parts;
+  }
+
+  async function run(label) {
+    $('run').disabled = $('rerun').disabled = true;
+    status('running…');
+    var parts = makeChunks();
+    log('--- ' + label + ' ---');
+    log('chunks: ' + CHUNKS + ' × ' + SKStream.mb(CHUNK_BYTES) + ' = ' + SKStream.mb(TOTAL) +
+        (broken.part >= 0 ? ' (chunk ' + (broken.part + 1) + ' is short on purpose)' : ''));
+    var started = performance.now();
+    try {
+      var set = await SKStream.ensureDataset({
+        parts: parts,
+        expectedSize: TOTAL,
+        cacheKey: cacheKey,
+        buildId: buildId,
+        mime: 'application/octet-stream',
+        workerUrl: 'js/writer.js',
+        onProgress: function (p) {
+          progress(p.total ? p.loaded / p.total : 0);
+          status('chunk ' + p.part + '/' + p.parts + ' — ' + SKStream.mb(p.loaded) + ' of ' + SKStream.mb(p.total) +
+            (p.bytesPerSecond ? ' · ' + (p.bytesPerSecond / 1048576).toFixed(1) + ' MB/s' : ''));
+        },
+        onStatus: function (s) { status(s); log('  status: ' + s); },
+        onLog: log,
+      });
+      var seconds = ((performance.now() - started) / 1000).toFixed(2);
+      log('kind: ' + set.kind + ', size: ' + set.size + ' bytes, verify: ' + JSON.stringify(set.verify || {}));
+      progress(1);
+      if (broken.part >= 0) {
+        status('FAILED to notice the short chunk — that is a bug', 'bad');
+        log('!! the short chunk was accepted');
+      } else if (set.kind === 'opfs-cached') {
+        status('cache hit — nothing was downloaded (memory stayed flat)', 'ok');
+      } else {
+        status('streamed ' + SKStream.mb(set.size) + ' in ' + seconds + 's with a few MB of RAM', 'ok');
+      }
+      var info = await SKStream.cacheInfo();
+      log('cache: ' + info.entries.map(function (e) { return e.name + '=' + e.size; }).join(', '));
+      set.dispose();
+    } catch (err) {
+      progress(0);
+      if (broken.part >= 0) {
+        status('caught the broken chunk, as it should', 'ok');
+        log('expected failure: ' + ((err && err.message) || err));
+      } else {
+        status('failed: ' + ((err && err.message) || err), 'bad');
+        log('unexpected failure: ' + ((err && err.stack) || err));
+      }
+    } finally {
+      $('run').disabled = $('rerun').disabled = false;
+    }
+  }
+
+  $('run').addEventListener('click', function () { broken.part = -1; run('full download'); });
+  $('rerun').addEventListener('click', function () { broken.part = -1; run('second run (cache)'); });
+  $('tamper').addEventListener('click', function () { broken.part = 4; run('short chunk'); });
+  $('clear').addEventListener('click', async function () {
+    var okDone = await SKStream.clearCache();
+    log('cache cleared: ' + okDone);
+    status('cached data cleared — the next run downloads again');
+    progress(0);
+  });
+
+  window.SKSelfTest = { run: run, setBroken: function (i) { broken.part = i; }, VERSION: SKStream.VERSION };
+  log('Silksong web loader self-test', 'stream=' + SKStream.VERSION);
+})();
+</script>
+</body>
+</html>

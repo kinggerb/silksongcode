@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<title>Hollow Knight: Silksong — web port</title>
+<style>
+  :root{--fg:#e8e8ef;--dim:#9a9aa8;--acc:#d8b4fe}
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{
+    min-height:100vh;background:radial-gradient(ellipse at 50% 0%,#171722 0%,#05050a 70%);
+    color:var(--fg);font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;
+    padding:clamp(20px,6vw,64px);display:flex;flex-direction:column;gap:28px;align-items:center
+  }
+  main{width:min(720px,100%)}
+  h1{font-weight:300;letter-spacing:.06em;font-size:clamp(26px,6vw,40px);margin-bottom:6px}
+  h1 small{display:block;font-size:.42em;letter-spacing:.22em;text-transform:uppercase;color:var(--dim);margin-top:10px}
+  a.card{
+    display:block;text-decoration:none;color:inherit;border:1px solid rgba(255,255,255,.14);border-radius:14px;
+    padding:16px 18px;margin-top:14px;background:rgba(255,255,255,.03);transition:background .15s,border-color .15s
+  }
+  a.card:hover{background:rgba(255,255,255,.07);border-color:rgba(216,180,254,.4)}
+  a.card b{display:block;font-weight:600;margin-bottom:2px}
+  a.card span{color:var(--dim);font-size:14px}
+  p{color:var(--dim);font-size:14px}
+  code{background:rgba(255,255,255,.08);border-radius:5px;padding:1px 5px;font-size:13px}
+  ul{margin:10px 0 0 18px;color:var(--dim);font-size:14px}
+</style>
+</head>
+<body>
+<main>
+  <h1>Hollow Knight: Silksong<small>web port &middot; iPad / mobile build</small></h1>
+
+  <a class="card" href="play.html">
+    <b>Play ▸</b>
+    <span>The game page. Streams the build in chunks into on-device storage (OPFS), never
+      building the archive in RAM, then boots Unity.</span>
+  </a>
+
+  <a class="card" href="demo.html">
+    <b>Loader self-test ▸</b>
+    <span>Checks what this device can do — OPFS, run-once caching, resume, chunk verification —
+      and runs the real chunk pipeline with a synthetic dataset. Works without the game build.</span>
+  </a>
+
+  <p style="margin-top:22px">This folder is the browser side of the port. It needs a Unity WebGL
+    build of Silksong in <code>web/Build/</code>, prepared by the tools that live in
+    <code>web/tools/</code>:</p>
+  <ul>
+    <li><code>node web/tools/prepare-build.mjs --build &lt;unity Build dir&gt;</code> — checks the build,
+      drops junk, replaces the cutscenes with tiny black placeholders, chunks the data and wasm,
+      and writes <code>build-manifest.json</code>.</li>
+    <li><code>node web/tools/verify-build.mjs</code> — proves the chunks on disk are complete and
+      match the manifest.</li>
+    <li><code>node web/tools/serve.mjs 8080</code> — serves this folder with the Range support and
+      MIME types iOS Safari needs.</li>
+  </ul>
+  <p style="margin-top:14px">See <code>web/IPAD.md</code> for the iPad story and
+    <code>web/BUILD.md</code> for the build pipeline.</p>
+</main>
+<script>
+  // On an iPad the useful destination is the game itself: forward, unless the
+  // visitor arrived with ?stay=1 (or the browser has no support at all).
+  try {
+    var params = new URLSearchParams(location.search);
+    if (params.get('stay') !== '1') {
+      var touch = (navigator.maxTouchPoints || 0) > 0 || /iPad|iPhone|iPod|Android/i.test(navigator.userAgent);
+      if (touch) location.replace('play.html' + location.search);
+    }
+  } catch (e) {}
+</script>
+</body>
+</html>
