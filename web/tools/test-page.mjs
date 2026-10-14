@@ -145,6 +145,19 @@ await test('the touch pad is on for a touch device and off for a desktop', () =>
   mac.close();
 });
 
+await test('a missing game build is explained and Start is disabled', async () => {
+  const win = bootPage(); // the default fetch stub returns 404 for the build files
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const missing = win.document.getElementById('buildMissing');
+  const start = win.document.getElementById('startBtn');
+  eq(win.document.getElementById('status').textContent, 'Game build not found', 'missing-build status');
+  eq(start.disabled, true, 'Start cannot be tapped without a build');
+  ok(!missing.classList.contains('hidden'), 'the missing-build help is shown');
+  ok(missing.querySelector('a[href="BUILD.md"]'), 'build instructions are linked');
+  ok(missing.querySelector('a[href="demo.html"]'), 'the no-build loader demo is linked');
+  win.close();
+});
+
 section('render scale and frame cap');
 
 await test('the canvas shrinks with the render scale and is stretched back with CSS', () => {

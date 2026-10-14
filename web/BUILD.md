@@ -10,6 +10,14 @@ serve.mjs           static server with Range requests and correct MIME types
 make-fixture-build.mjs   a synthetic build, for tests and for demo.html
 ```
 
+GitHub Pages publishes this repository's root. The root `index.html` sends the
+project homepage to `web/play.html` while preserving the query and hash, and the
+root `.nojekyll` file prevents Jekyll from transforming the site. Until a real
+Unity WebGL build is prepared and published, the play page says **Game build not
+found**, disables **Start**, and links back to this guide and `demo.html`. That
+is the expected state: the demo tests the loader without pretending the game is
+available.
+
 ---
 
 ## 1. You need a Unity WebGL build
@@ -164,13 +172,14 @@ node web/tools/verify-build.mjs --out web
 node web/tools/serve.mjs 8080
 ```
 
-For GitHub Pages, copy `web/ci/pages-workflow.yml` to `.github/workflows/web.yml`
-once (it runs the test suites, stages the boss roster and publishes `web/`; it
-is not pre-installed under `.github/workflows/` because pushing workflow files
-needs extra repository permissions). Note that `web/Build/` is **git-ignored** by default: a
-prepared build is hundreds of MB and does not belong in a code repository —
-publish it from a release, an object store, or a CDN and point the page at it
-with `play.html?base=https://…/`. The page and the tools only need that URL.
+This repository's GitHub Pages site serves the repository root; the root
+`index.html` redirects visitors to `web/play.html`. The optional Actions
+template remains at `web/ci/pages-workflow.yml` and is not installed under
+`.github/workflows/` (which requires extra repository permissions). Note that
+`web/Build/` is **git-ignored** by default: a prepared build is hundreds of MB
+and does not belong in a code repository — publish it from a release, an object
+store, or a CDN and point the page at it with `play.html?base=https://…/`. The
+page and the tools only need that URL.
 
 The host must:
 

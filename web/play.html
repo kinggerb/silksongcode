@@ -51,6 +51,10 @@
     cursor:pointer;text-transform:uppercase;
   }
   button.main:active{background:rgba(255,255,255,.22)}
+  button.main:disabled{opacity:.42;cursor:not-allowed}
+  #buildMissing{font-size:13px;line-height:1.6;max-width:42em}
+  #buildMissing p + p{margin-top:8px}
+  #buildMissing a{color:#c9a7ff;text-underline-offset:3px}
   #notes{font-size:11px;opacity:.5;line-height:1.6;max-width:40em}
   .warn{color:#ffd479}
   .err{color:#ff9d9d;white-space:pre-wrap;word-break:break-word;max-width:44em;text-align:left;font-size:12px}
@@ -130,7 +134,11 @@
   <div id="pct"></div>
   <div id="sub">First run downloads the game data once, in chunks, straight to this device's
     storage — later loads start without downloading again.</div>
-  <button class="main" id="startBtn">Start</button>
+  <div id="buildMissing" class="hidden" role="status" aria-live="polite">
+    <p>This repository does not include the Unity WebGL game build.</p>
+    <p><a href="BUILD.md">Build instructions</a> · <a href="demo.html">Try the loader demo</a></p>
+  </div>
+  <button class="main" id="startBtn" disabled>Start</button>
   <div id="notes">
     Keep this tab open and in the foreground while the game loads.<br>
     On an iPad, switching apps or letting the screen lock can make Safari kill the tab.
@@ -272,7 +280,7 @@
   var $ = function (id) { return document.getElementById(id); };
   var screenEl = $('screen'), statusEl = $('status'), barEl = $('bar').firstElementChild,
       pctEl = $('pct'), subEl = $('sub'), errEl = $('err'), notesEl = $('notes'),
-      startBtn = $('startBtn'), bgWarn = $('bgwarn'), toastEl = $('toast'),
+      buildMissingEl = $('buildMissing'), startBtn = $('startBtn'), bgWarn = $('bgwarn'), toastEl = $('toast'),
       panelEl = $('panel'), logBox = $('logbox'), fpsEl = $('fps'), memCapEl = $('memcap'), padEl = $('pad');
 
   var logLines = [];
@@ -334,7 +342,7 @@
   async function resolveAssetBase() {
     try {
       var head = await fetch(abs('StreamingAssets/StreamingAssets.txt'), { method: 'HEAD', cache: 'no-store' });
-      if (head && head.ok) return;
+      if (head && head.ok) return true;
     } catch (e) { /* fall through */ }
     if (!ASSET_BASE && FALLBACK_BASE) {
       ASSET_BASE = FALLBACK_BASE;
@@ -342,16 +350,31 @@
       log('local assets not found next to this page — using ' + ASSET_BASE);
     }
     // No local assets and no fallback host: say so now instead of failing at
-    // the first chunk with a 404.
+    // the first chunk with a 404. A network error is inconclusive, so leave
+    // Start available in that case and let the normal retry path handle it.
     try {
       var probe = await fetch(abs('Build/build-manifest.json'), { cache: 'no-store' });
       if (!probe.ok) {
         log('warning: no Build/ folder next to this page (HTTP ' + probe.status + ') — see BUILD.md');
-        toast('Game build not found — run tools/prepare-build.mjs, or add ?base=<url>', 9000);
+        return false;
       }
+      return true;
     } catch (e) {
       log('warning: could not reach Build/ next to this page: ' + ((e && e.message) || e));
+      return null;
     }
+  }
+
+  function showMissingBuild() {
+    statusEl.textContent = 'Game build not found';
+    $('bar').classList.add('hidden');
+    pctEl.classList.add('hidden');
+    subEl.classList.add('hidden');
+    notesEl.classList.add('hidden');
+    errEl.classList.add('hidden');
+    buildMissingEl.classList.remove('hidden');
+    startBtn.disabled = true;
+    startBtn.setAttribute('aria-describedby', 'buildMissing');
   }
 
   // Only used when the page is not served next to the assets: Unity asks for
@@ -2491,12 +2514,18 @@
         notesEl.parentNode.insertBefore(hint, notesEl.nextSibling);
       });
     }
-    resolveAssetBase().then(function () {
+    resolveAssetBase().then(function (buildAvailable) {
       installUrlRewriter();
-      startBtn.addEventListener('click', function onStart() {
-        startBtn.removeEventListener('click', onStart);
-        start();
-      });
+      if (buildAvailable === false) {
+        showMissingBuild();
+      } else {
+        startBtn.disabled = false;
+        startBtn.removeAttribute('aria-describedby');
+        startBtn.addEventListener('click', function onStart() {
+          startBtn.removeEventListener('click', onStart);
+          start();
+        });
+      }
       log('asset base: ' + (ASSET_BASE || '(this page)'));
     });
   })();
