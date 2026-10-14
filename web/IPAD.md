@@ -54,12 +54,17 @@ prints them.
 | Where | URL |
 | --- | --- |
 | Local, from this repo | `node web/tools/serve.mjs 8080` → `http://<your-computer-ip>:8080/play.html` |
-| GitHub Pages (after the workflow runs) | `https://kinggerb.github.io/silksongcode/` |
-| The loader self-test (no build needed) | `…/demo.html` |
+| GitHub Pages project root (redirects to `web/play.html`) | `https://kinggerb.github.io/silksongcode/` |
+| The loader self-test (no build needed) | `https://kinggerb.github.io/silksongcode/web/demo.html` |
 | With the assets somewhere else | `play.html?base=https://…/` |
 
-On the iPad: open the URL in Safari → **Start** → keep the tab in the
-foreground until the game appears. Add it to the home screen
+This repository does not currently include a Unity WebGL build. Until one is
+prepared and published, the play page says **Game build not found**, disables
+**Start**, and links to [the build guide](BUILD.md) and the loader demo. This is
+the expected state; the demo works without the game build.
+
+When a game build is available, open the URL in Safari on the iPad → **Start**
+→ keep the tab in the foreground until the game appears. Add it to the home screen
 (*Share ▸ Add to Home Screen*) if you want Safari to stop evicting the cached
 data after a week.
 

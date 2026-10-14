@@ -51,7 +51,7 @@ Unity**, 全程不在内存里拼装, 所以下载过程中峰值内存只有几
 ```shell
 cd web
 npm install                      # 只有 jsdom, 给页面测试用
-npm test                         # 6 个测试套件, 75 个用例
+npm test                         # 6 个测试套件, 76 个用例
 
 node tools/serve.mjs 8080        # 静态服务器 (支持 Range + wasm MIME), iPad 直接访问
 node tools/make-fixture-build.mjs   # 造一份假构建, 用 demo.html 验证加载器
@@ -60,3 +60,8 @@ node tools/make-fixture-build.mjs   # 造一份假构建, 用 demo.html 验证�
 页面 (`web/play.html`) 需要一份 **Unity WebGL 构建** (`Build/*.loader.js|framework.js|wasm|data`)
 才能真正开始游戏; 这个仓库里没有这份构建, 怎么产出, 怎么处理, 怎么校验见
 `web/BUILD.md`, 实机使用与画质档位见 `web/IPAD.md`.
+
+GitHub Pages 的仓库根地址 `https://kinggerb.github.io/silksongcode/` 由根目录的
+`index.html` 转到 `web/play.html`（保留查询参数和 hash），`.nojekyll` 则让 Pages 原样提供文件。
+在 Unity WebGL 构建发布前, 页面会明确显示 **Game build not found**, 禁用 Start, 并链接到
+`web/BUILD.md` 和无需游戏构建即可运行的 `web/demo.html`；这是预期状态, 不是可启动的游戏。
