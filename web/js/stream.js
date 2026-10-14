@@ -40,7 +40,7 @@
 })(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
 
-  var VERSION = '1.0.0';
+  var VERSION = '1.0.1';
   var DEFAULT_DIR = 'silksong-webgl-cache';
   var FLUSH_EVERY = 32 * 1024 * 1024; // flush OPFS about every 32 MB
   var MAX_RETRIES = 4; // per part (positional sinks only)
@@ -449,15 +449,38 @@
     if (!res.ok) throw new Error('HTTP ' + res.status + ' for ' + p.url);
     if (!res.body) throw new Error('no readable body for ' + p.url);
 
-    // "Checking game data": if the server tells us how big the part is, it has
-    // to agree with the manifest. A stale deploy or a chopped file is caught
-    // here instead of inside Unity, where it shows up as a black screen.
+    // "Checking game data": a part that is not the size the manifest measured
+    // has to be caught here instead of inside Unity, where it shows up as a
+    // black screen. The Content-Length header alone cannot decide that, though.
+    //
+    // A cross-origin CDN (jsDelivr for the community build) may put a transfer
+    // encoding on the response, and then Content-Length describes the *encoded*
+    // body while res.body hands us *decoded* bytes. Content-Encoding is not a
+    // CORS-safelisted header, so a page like this one cannot even read it to
+    // tell the two cases apart. Comparing the two sizes up front therefore
+    // turned a perfectly good download into a bogus "rebuild or re-run
+    // prepare-build.mjs", which is also flagged as non-retryable — the load
+    // died on a part that was fine.
+    //
+    // So the header is only trusted when the disagreement cannot be an encoding
+    // artefact: compression only ever shrinks the wire size, so a declared size
+    // *above* the manifest is a genuine mismatch and is still refused before a
+    // single byte is written. Every other case is settled by counting the bytes
+    // that actually arrive below, which rejects a short part and an oversized
+    // one just as firmly.
+    var log = makeLogger(p.log);
     if (p.bytes > 0 && res.headers && typeof res.headers.get === 'function') {
-      var declared = Number(res.headers.get('content-length') || 0);
-      if (declared && declared !== p.bytes) {
+      var declared = Number(res.headers.get('content-length') || 0) || 0;
+      if (declared > p.bytes) {
         throw new Error(
-          'part ' + p.index + ' is ' + declared + ' bytes on the server but ' + p.bytes +
+          'part ' + p.index + ' is ' + declared + ' bytes on the server but only ' + p.bytes +
             ' in the manifest — rebuild or re-run prepare-build.mjs'
+        );
+      }
+      if (declared && declared < p.bytes) {
+        log(
+          'part ' + p.index + ': the server announced ' + declared + ' bytes for a ' + p.bytes +
+            ' byte part (a compressed transfer does that) — checking the bytes as they arrive'
         );
       }
     }
@@ -487,6 +510,19 @@
 
         var start = received; // offset of this chunk inside the part
         received += value.byteLength;
+
+        // The real size check, on the bytes that actually arrived: more than the
+        // manifest measured means the deployed part is not the one that was
+        // chunked, and writing the extra would shift every later part in the
+        // file. Failing here rather than after the download keeps the message
+        // accurate — and unlike a short read, this will not fix itself on a
+        // retry, so fetchPartTo treats it as permanent.
+        if (p.bytes > 0 && received > p.bytes) {
+          throw new Error(
+            'part ' + p.index + ' is bigger than the manifest: ' + received + ' bytes received, ' +
+              p.bytes + ' expected — rebuild or re-run prepare-build.mjs'
+          );
+        }
 
         if (received <= p.skip) {
           p.onAdvance();

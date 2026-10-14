@@ -3,10 +3,12 @@
  * ----------------------------------------------------------------------------
  *   node web/tools/test-stream.mjs
  *
- * Covers: byte-exact assembly, chunk size disagreement with the server, a short
- * chunk, retries after a broken part, resume from what is already on disk,
- * cache reuse with the completion marker, cache invalidation when the build id
- * changes, sampled verification, and the manifest → chunk list conversion.
+ * Covers: byte-exact assembly, a part that disagrees with the manifest (in
+ * either direction, with or without a usable Content-Length), a CDN that puts a
+ * transfer encoding on the response, a short chunk, retries after a broken part,
+ * resume from what is already on disk, cache reuse with the completion marker,
+ * cache invalidation when the build id changes, sampled verification, and the
+ * manifest → chunk list conversion.
  * ==========================================================================*/
 
 import { section, test, eq, ok, close, rejects, done, serveDir, tmpDir } from './testkit.mjs';
@@ -160,26 +162,132 @@ await test('reports progress with a part counter and a throughput estimate', asy
 
 section('checking the data');
 
-await test('a chunk that is a different size than the manifest claims is refused, not downloaded', async () => {
+await test('a chunk the server reports as bigger than the manifest is refused, not written', async () => {
+  // Compression can only shrink the wire size, so a declared size *above* the
+  // manifest is a real mismatch: refuse it before a single byte reaches disk.
   const dir = path.join(TMP, 'mismatch');
   await fsp.mkdir(dir, { recursive: true });
-  const { parts } = writeChunks(dir, 2, 256);
+  const { parts } = writeChunks(dir, 1, 256);
   const server = await serveDir(dir);
   const sink = new FakeOpfsSink({ name: 'm.bin' });
   const message = await rejects(
     run({
       sink,
       ensure: {
-        parts: [{ url: server.url + parts[0].url, bytes: parts[0].bytes }, { url: server.url + parts[1].url, bytes: 999 }],
-        expectedSize: 1255,
+        parts: [{ url: server.url + parts[0].url, bytes: 100 }],
+        expectedSize: 100,
         cacheKey: 'm.bin',
         buildId: 'b',
       },
     }),
     /manifest/,
-    'loading with a wrong manifest size'
+    'loading with a manifest smaller than the file'
   );
-  ok(/999 in the manifest/.test(message), 'the message names the manifest size: ' + message);
+  ok(/256 bytes on the server but only 100 in the manifest/.test(message), 'the message names both sizes: ' + message);
+  eq(sink.writes, 0, 'nothing was written for the refused part');
+  eq(sink.buffer, null, 'and no partial file was started');
+  server.stop();
+});
+
+await test('a chunk bigger than the manifest with no usable header is refused on the bytes received', async () => {
+  // Same mismatch, but the response carries no Content-Length at all (chunked
+  // transfer), so only counting the bytes that arrive can catch it — and it must
+  // not burn the retry budget, because a wrong manifest will not heal itself.
+  const dir = path.join(TMP, 'oversize');
+  await fsp.mkdir(dir, { recursive: true });
+  const { parts } = writeChunks(dir, 1, 512);
+  const server = await serveDir(dir);
+  const realFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async (url, opts) => {
+    calls++;
+    const res = await realFetch(url, opts);
+    const headers = new Headers(res.headers);
+    headers.delete('content-length');
+    return new Response(res.body, { status: res.status, statusText: res.statusText, headers });
+  };
+  const sink = new FakeOpfsSink({ name: 'o.bin' });
+  const message = await rejects(
+    run({
+      sink,
+      ensure: {
+        parts: [{ url: server.url + parts[0].url, bytes: 256 }],
+        expectedSize: 256,
+        cacheKey: 'o.bin',
+        buildId: 'b',
+      },
+    }),
+    /bigger than the manifest/,
+    'loading a part that overruns the manifest'
+  );
+  globalThis.fetch = realFetch;
+  ok(/bytes received, 256 expected/.test(message), 'the message names the manifest size: ' + message);
+  eq(calls, 1, 'a manifest mismatch is permanent, so it was not retried');
+  server.stop();
+});
+
+await test('a manifest size the server never reaches still fails the load', async () => {
+  const dir = path.join(TMP, 'toobig');
+  await fsp.mkdir(dir, { recursive: true });
+  const { parts } = writeChunks(dir, 1, 256);
+  const server = await serveDir(dir);
+  const sink = new FakeOpfsSink({ name: 't.bin' });
+  const message = await rejects(
+    run({
+      sink,
+      ensure: {
+        parts: [{ url: server.url + parts[0].url, bytes: 999 }],
+        expectedSize: 999,
+        cacheKey: 't.bin',
+        buildId: 'b',
+      },
+    }),
+    /ended early/,
+    'loading with a manifest bigger than the file'
+  );
+  ok(/256\/999 bytes/.test(message), 'the message reports what arrived: ' + message);
+  ok(!sink.files.has('t.bin.ok'), 'no completion marker for a short download');
+  server.stop();
+});
+
+await test('a CDN that compresses the transfer loads fine despite a smaller Content-Length', async () => {
+  // The regression this exists for: a cross-origin CDN answers with
+  // Content-Encoding, so Content-Length describes the encoded body while the
+  // page reads decoded bytes. Content-Encoding is not CORS-exposed, so the
+  // loader cannot tell that apart from a short file — it has to go by the bytes
+  // that arrive. This used to abort a good download with "rebuild or re-run
+  // prepare-build.mjs".
+  const dir = path.join(TMP, 'encoded');
+  await fsp.mkdir(dir, { recursive: true });
+  const { parts, expected } = writeChunks(dir, 3, 512);
+  const server = await serveDir(dir);
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url, opts) => {
+    const res = await realFetch(url, opts);
+    const headers = new Headers(res.headers);
+    const real = Number(headers.get('content-length') || 0);
+    if (real) headers.set('content-length', String(Math.floor(real * 0.4)));
+    headers.set('content-encoding', 'gzip');
+    return new Response(res.body, { status: res.status, statusText: res.statusText, headers });
+  };
+  const sink = new FakeOpfsSink({ name: 'e.bin' });
+  const set = await run({
+    sink,
+    ensure: {
+      parts: parts.map((p) => ({ url: server.url + p.url, bytes: p.bytes })),
+      expectedSize: expected.length,
+      cacheKey: 'e.bin',
+      buildId: 'b',
+    },
+  });
+  globalThis.fetch = realFetch;
+  eq(set.size, expected.length, 'the archive assembled to the manifest size');
+  ok(sink.buffer.equals(expected), 'and its bytes are the decoded ones, byte for byte');
+  ok(sink.files.get('e.bin.ok').startsWith('b'), 'completion marker written');
+  ok(
+    logs.some((line) => /compressed transfer/.test(line)),
+    'the encoded transfer was noticed in the log instead of being fatal'
+  );
   server.stop();
 });
 
