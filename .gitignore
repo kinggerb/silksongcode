@@ -16,3 +16,11 @@ __pycache__/
 .pytest_cache/
 
 /docs/silksong-rl-notes.zip
+
+# Web port (web/) — the page, the loader and the tools are tracked; a prepared
+# build (hundreds of MB) and the staged boss roster are not. See web/BUILD.md §5.
+/web/Build/
+/web/node_modules/
+/web/.fixture-build/
+/web/BossScenes/
+/web/*.log
