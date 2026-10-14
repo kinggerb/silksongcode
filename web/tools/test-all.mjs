@@ -15,6 +15,7 @@ const skipDom = process.argv.includes('--no-dom');
 const suites = [
   ['stream loader', 'test-stream.mjs'],
   ['build manifest', 'test-manifest.mjs'],
+  ['community build adapter', 'test-community-build.mjs'],
   ['unity archive + patches', 'test-webdata.mjs'],
   ['save codec', 'test-save-codec.mjs'],
   ['prepare → verify pipeline', 'test-pipeline.mjs'],

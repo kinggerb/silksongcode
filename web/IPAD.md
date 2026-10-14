@@ -3,15 +3,16 @@
 This folder is the browser side of the port. It takes the same approach as the
 Hollow Knight web port (`kinggerb/hollowknightgame`): **stream the game in
 chunks onto the device, never build it in RAM, and keep the tab under iPadOS's
-memory ceiling.** Everything here is tested (`web/package.json` → `npm test`).
+memory ceiling.** The automated checks are in `web/package.json` (`npm test`);
+full CDN download and real iPad Safari behavior still need device testing.
 
-> **Read this first:** this repository does not contain Silksong. It contains the
-> RL mods, the trainer and this port. A Unity **WebGL build** of the game is
-> required for `play.html` to actually start the game — see
-> [BUILD.md §1](BUILD.md#1-you-need-a-unity-webgl-build). Everything else is
-> ready: chunking, verification, caching, the graphics ladder, saves and the
-> boss-rush roster. `demo.html` proves the pipeline works on your device without
-> a build.
+> **Read this first:** the repository does not contain Silksong's original
+> Unity project. The play page now uses a pinned community WebGL build source by
+> default when no prepared local build is present. Its first run downloads about
+> 1.94 GiB of Addressables data into OPFS; see
+> [COMMUNITY-BUILD.md](COMMUNITY-BUILD.md) for the source, storage requirements,
+> and limitations. `demo.html` remains a small loader test that does not download
+> or pretend to contain the game.
 
 ---
 
@@ -36,10 +37,11 @@ The Hollow Knight port hit precisely this wall at 926 MB.
 | Step | How | Effect |
 | --- | --- | --- |
 | Download | every chunk is streamed straight into the **Origin Private File System** through a worker (`FileSystemSyncAccessHandle`) | peak RAM during download: a few MB, not GB. `js/writer.js` |
-| Second visit | the merged file stays on disk, with a `.ok` marker keyed by build id | no download at all; a crash + retry resumes from the byte it reached |
-| Hand-off | Unity gets **one** file-backed blob URL | its own ArrayBuffer is the only big allocation left |
-| Verification | chunk sizes probed with `Range: bytes=0-0` before the download, digests checked after | a truncated or stale build is caught before Unity shows a black screen |
-| Data | cutscene videos are replaced by ~600-byte black placeholders and junk is left out (`prepare-build.mjs`) | hundreds of MB less to download and to hold |
+| Second visit | prepared files and the community Addressables archive stay in OPFS, keyed by build id | completed data is reused; interrupted downloads resume |
+| Addressables | the community ZIP is indexed from its OPFS `File`; `zip.js` extracts only requested bundles | no 2 GB `ArrayBuffer`, and no eager unpack of every bundle |
+| Hand-off | a prepared build gives Unity one file-backed blob URL; the community build uses Unity's compressed CDN entry points | avoids concatenating multi-gigabyte assets in page memory |
+| Verification | prepared builds probe chunk sizes and sample digests; the community source uses pinned commit IDs, exact ZIP-part sizes and a ZIP directory check | stale or truncated files fail before Unity uses them |
+| Data | prepared builds can replace cutscenes with ~600-byte black placeholders and omit junk (`prepare-build.mjs`) | reduces the prepared build's download and storage footprint |
 | Memory | render-scale ladder (100 % → 25 %), frame cap, auto-degrade, a hard heap cap that reloads, and a crash ladder that starts the next session lower | the tab stays under the ceiling instead of being killed |
 | Audio | a guard relabels iOS's `NotSupportedError` on `play()` as `NotAllowedError`, which is the error Unity waits out | sound starting late no longer kills the game |
 | Room audio | the framework's `disconnectSource` drops the `<audio>` source (`tools/patches.mjs`) | WebKit frees each room's music decoder |
@@ -55,18 +57,17 @@ prints them.
 | --- | --- |
 | Local, from this repo | `node web/tools/serve.mjs 8080` → `http://<your-computer-ip>:8080/play.html` |
 | GitHub Pages project root (redirects to `web/play.html`) | `https://kinggerb.github.io/silksongcode/` |
-| The loader self-test (no build needed) | `https://kinggerb.github.io/silksongcode/web/demo.html` |
-| With the assets somewhere else | `play.html?base=https://…/` |
+| The loader self-test (no game download) | `https://kinggerb.github.io/silksongcode/web/demo.html` |
+| With a prepared build hosted elsewhere | `play.html?base=https://…/` |
+| Disable the pinned community build fallback | `play.html?community=0` |
 
-This repository does not currently include a Unity WebGL build. Until one is
-prepared and published, the play page says **Game build not found**, disables
-**Start**, and links to [the build guide](BUILD.md) and the loader demo. This is
-the expected state; the demo works without the game build.
-
-When a game build is available, open the URL in Safari on the iPad → **Start**
-→ keep the tab in the foreground until the game appears. Add it to the home screen
-(*Share ▸ Add to Home Screen*) if you want Safari to stop evicting the cached
-data after a week.
+Open the project URL in Safari on the iPad and tap **Start**. With the default
+community source, the first run streams about 1.94 GiB of addressable assets to
+OPFS and may take a long time; use Wi-Fi, keep Safari in the foreground, and
+make sure the device has enough free storage. Later runs use the cached archive.
+The compressed Unity entry points remain on the pinned source CDN. Add the page
+to the home screen (*Share ▸ Add to Home Screen*) if you want Safari to retain
+the origin's cache longer.
 
 `tools/serve.mjs` exists because `python -m http.server` ignores Range requests
 and serves `.wasm` as octet-stream, which breaks both the loader's size probes
@@ -74,11 +75,13 @@ and Unity's stream compilation.
 
 ## 4. What to expect
 
-* **First run** — the download is written to disk as it arrives, then Unity
-  copies it into memory ("Loading into memory — x %"). That last phase is the
-  memory-hungry one: keep the tab in the foreground.
-* **Later runs** — no download; the cache is verified with sampled digests and
-  served straight from disk.
+* **First run** — the community ZIP parts (or, for a prepared build, the data
+  and wasm chunks) are written to OPFS as they arrive. The community build's
+  compressed Unity files are fetched from the pinned CDN. Unity then loads its
+  runtime memory ("Loading into memory — x %"); keep the tab in the foreground.
+* **Later runs** — the large community ZIP is reused from OPFS. Prepared-build
+  chunks use sampled digest verification; community ZIP parts use exact sizes
+  and a pinned source commit.
 * **Graphics** — iPads start at **Balanced** (85 % render scale, 60 fps cap).
   Menu ▸ Graphics & performance has seven levels down to **Rock bottom**
   (25 % scale, 24 fps).
@@ -108,9 +111,11 @@ play.html?preset=low      play.html?fps=30      play.html?scale=0.5
 play.html?check=strict    play.html?verify=full play.html?auto=0
 ```
 
+These `check` and `verify` options apply to prepared-manifest builds:
 `?check=0` skips the pre-download data check, `?check=strict` refuses to boot a
-build with a bad chunk, `?verify=full` hashes the whole data file instead of
-sampling its first and last 4 MB.
+build with a bad chunk, and `?verify=full` hashes the whole data file instead of
+sampling its first and last 4 MB. The community mode validates its pinned
+source descriptor and split ZIP sizes instead.
 
 The page also caps the frame rate by wrapping `requestAnimationFrame` — on a
 120 Hz iPad an uncapped game draws twice the frames for no visible gain — and
@@ -160,7 +165,7 @@ page can export, import and *install* them:
 | Tab disappears during "Loading into memory" | Retry (the data is cached, so it skips the download) and lower the render scale. |
 | The tab vanishes with no message at all | That is jetsam, and it happens too fast for the page to draw. *Menu ▸ Stability* shows the heap the last session died at. |
 | Black screen after the bar | Check the log panel: `saved file is N bytes, expected M` means the download was cut; reload and it resumes. `the data check` lines say if a chunk is wrong. |
-| `There is not enough free storage` | Free space in *Settings ▸ General ▸ iPad Storage*; the cache needs about the size of the build. |
+| `There is not enough free storage` | Free space in *Settings ▸ General ▸ iPad Storage*; the community ZIP alone needs about 1.94 GiB, plus headroom for extracted bundles and Unity. |
 | No sound | Tap the screen once — iOS wants a gesture. Then check the log for `audio guard` lines. |
 | Everything is slow | Graphics → Smooth or Low. Auto-degrade does this on its own. |
 | Boss saves missing in the menu | `node web/tools/stage-boss-scenes.mjs` (the roster is not committed twice). |

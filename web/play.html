@@ -55,7 +55,8 @@
   #buildMissing{font-size:13px;line-height:1.6;max-width:42em}
   #buildMissing p + p{margin-top:8px}
   #buildMissing a{color:#c9a7ff;text-underline-offset:3px}
-  #notes{font-size:11px;opacity:.5;line-height:1.6;max-width:40em}
+  #notes{font-size:11px;opacity:.7;line-height:1.6;max-width:40em}
+  #notes a{color:#c9a7ff;text-underline-offset:3px}
   .warn{color:#ffd479}
   .err{color:#ff9d9d;white-space:pre-wrap;word-break:break-word;max-width:44em;text-align:left;font-size:12px}
   .hidden{display:none !important}
@@ -132,16 +133,16 @@
   <div id="status">Tap start to begin.</div>
   <div id="bar"><i></i></div>
   <div id="pct"></div>
-  <div id="sub">First run downloads the game data once, in chunks, straight to this device's
-    storage — later loads start without downloading again.</div>
+  <div id="sub">The community build is loaded on demand. The first run stores its large Addressables archive on this device; later runs reuse it.</div>
   <div id="buildMissing" class="hidden" role="status" aria-live="polite">
-    <p>This repository does not include the Unity WebGL game build.</p>
+    <p>No prepared Unity WebGL build or configured community build source was found.</p>
     <p><a href="BUILD.md">Build instructions</a> · <a href="demo.html">Try the loader demo</a></p>
   </div>
   <button class="main" id="startBtn" disabled>Start</button>
   <div id="notes">
     Keep this tab open and in the foreground while the game loads.<br>
-    On an iPad, switching apps or letting the screen lock can make Safari kill the tab.
+    On an iPad, switching apps or letting the screen lock can make Safari kill the tab.<br>
+    <a href="COMMUNITY-BUILD.md">Community build source and storage details</a>
   </div>
   <div id="err" class="err"></div>
 </div>
@@ -240,6 +241,8 @@
 
 <script src="js/stream.js"></script>
 <script src="js/manifest.js"></script>
+<script src="js/community-build.js"></script>
+<script src="js/zip.min.js"></script>
 <script src="js/save-codec.js"></script>
 <script src="js/boss-scenes.js"></script>
 <script>
@@ -247,14 +250,13 @@
  * Hollow Knight: Silksong — iPad/mobile front-end
  * ----------------------------------------------------------------------------
  * Loading is done by js/stream.js:
- *   1. the game data chunks + wasm chunks are streamed to OPFS (on-device
- *      storage) through js/writer.js — a few MB of RAM, resumable;
- *   2. the merged files are remembered, so later loads skip the download;
- *   3. only the data Unity itself pulls into its ArrayBuffer stays in RAM.
+ *   - prepared builds stream their data/wasm chunks into OPFS and resume;
+ *   - the pinned community source streams its split Addressables ZIP into OPFS,
+ *     then js/community-build.js extracts requested bundles on demand.
  *
- * What the build *is* (file names, chunk sizes, chunk count, digests) comes
- * from Build/build-manifest.json, written by tools/prepare-build.mjs; see
- * js/manifest.js. Nothing about the build is hard-coded here.
+ * Build metadata comes from Build/build-manifest.json for a prepared build or
+ * community-build.json for the pinned community source. The game payload is
+ * never embedded in this HTML.
  * ==========================================================================*/
 (function () {
   'use strict';
@@ -267,12 +269,15 @@
   var BUILD = null;
   var PLAN = {};
 
-  // Optional override, e.g. play.html?base=https://cdn.example.com/silksong/
-  var FALLBACK_BASE = ''; // empty: the assets live next to this page
+  // Optional override for a prepared build, e.g. play.html?base=https://cdn.example.com/silksong/
+  var FALLBACK_BASE = '';
   var params = new URLSearchParams(location.search);
   var ASSET_BASE = params.get('base') || ''; // '' = same folder as this page
   var useRewriter = false;
-  var totalBytes = 0; // game data + wasm, known once the manifest is read
+  var BUILD_SOURCE = 'prepared';
+  var COMMUNITY_BUILD = null;
+  var COMMUNITY_ZIP_MOUNT = null;
+  var totalBytes = 0; // manifest datasets or the community Addressables archive
 
   /* ---------------------------------------------------------------- *
    * Small helpers
@@ -337,31 +342,41 @@
   }
 
   /* ---------------------------------------------------------------- *
-   * Asset base: make sure the Build/ files are reachable from this page
+   * Pick a build source. A prepared local/CDN manifest takes priority; if it
+   * is absent, use the pinned community WebGL build descriptor in this repo.
+   * The large payload stays on the source CDN and is streamed into OPFS.
    * ---------------------------------------------------------------- */
   async function resolveAssetBase() {
-    try {
-      var head = await fetch(abs('StreamingAssets/StreamingAssets.txt'), { method: 'HEAD', cache: 'no-store' });
-      if (head && head.ok) return true;
-    } catch (e) { /* fall through */ }
-    if (!ASSET_BASE && FALLBACK_BASE) {
-      ASSET_BASE = FALLBACK_BASE;
-      useRewriter = true;
-      log('local assets not found next to this page — using ' + ASSET_BASE);
-    }
-    // No local assets and no fallback host: say so now instead of failing at
-    // the first chunk with a 404. A network error is inconclusive, so leave
-    // Start available in that case and let the normal retry path handle it.
+    if (!ASSET_BASE && FALLBACK_BASE) ASSET_BASE = FALLBACK_BASE;
     try {
       var probe = await fetch(abs('Build/build-manifest.json'), { cache: 'no-store' });
-      if (!probe.ok) {
-        log('warning: no Build/ folder next to this page (HTTP ' + probe.status + ') — see BUILD.md');
-        return false;
+      if (probe && probe.ok) {
+        BUILD_SOURCE = 'prepared';
+        return true;
       }
+      log('no prepared build manifest at ' + abs('Build/build-manifest.json') + ' (HTTP ' + (probe && probe.status) + ')');
+    } catch (e) {
+      log('prepared build manifest probe failed: ' + ((e && e.message) || e));
+    }
+
+    if (params.get('community') === '0' || typeof SKCommunityBuild === 'undefined') return false;
+    try {
+      var response = await fetch('community-build.json', { cache: 'no-store' });
+      if (!response || !response.ok) return false;
+      COMMUNITY_BUILD = SKCommunityBuild.validate(await response.json());
+      // `base=` remains the override for a prepared build. The community
+      // descriptor has its own override so the two deployment modes are clear.
+      ASSET_BASE = params.get('communityBase') || COMMUNITY_BUILD.base;
+      ASSET_BASE = ASSET_BASE.replace(/\/?$/, '/');
+      useRewriter = true;
+      BUILD_SOURCE = 'community';
+      $('sub').textContent = 'First run downloads about ' + mb(COMMUNITY_BUILD.assetArchive.total) +
+        ' of game assets to this device’s storage. It is resumable; keep Safari open on Wi-Fi. Later runs reuse the cached archive.';
+      log('using community WebGL source ' + COMMUNITY_BUILD.source + ' @ ' + COMMUNITY_BUILD.commit);
       return true;
     } catch (e) {
-      log('warning: could not reach Build/ next to this page: ' + ((e && e.message) || e));
-      return null;
+      log('community build descriptor could not be loaded: ' + ((e && e.message) || e));
+      return false;
     }
   }
 
@@ -382,7 +397,7 @@
   // chosen base as well.
   function installUrlRewriter() {
     if (!useRewriter) return;
-    var known = /^(Build\/|StreamingAssets\/|[A-Za-z0-9_.-]+\.(data|wasm))$/;
+    var known = /^(?:Build\/.+|StreamingAssets\/.+|[A-Za-z0-9_.-]+\.(?:data|wasm))$/;
     var origFetch = window.fetch.bind(window);
     window.fetch = function (input, init) {
       try {
@@ -1350,6 +1365,8 @@
         memoryLimits: memoryLimits,
         evaluateLastSession: evaluateLastSession,
         planFromManifest: planFromManifest,
+        assetBase: function () { return ASSET_BASE; },
+        buildSource: function () { return BUILD_SOURCE; },
         perfDescription: perfDescription,
         frameInterval: function () { return frameInterval; },
         resetStores: function () {
@@ -2159,6 +2176,79 @@
    * ---------------------------------------------------------------- */
   var booted = false, bootedAt = 0, currentStage = 'idle', unityInstance = null;
 
+  function makeUnityConfig(dataUrl, codeUrl, frameworkUrl, streamingAssetsUrl) {
+    return {
+      dataUrl: dataUrl,
+      codeUrl: codeUrl,
+      frameworkUrl: frameworkUrl,
+      streamingAssetsUrl: streamingAssetsUrl,
+      companyName: 'Team Cherry',
+      productName: 'Hollow Knight Silksong',
+      productVersion: '1.0',
+      INITIAL_MEMORY: 33554432,
+      maximumHeapSize: 1468006400,
+      // Keep the WebGL backing buffers small on iPad Safari.
+      webglContextAttributes: {
+        alpha: false,
+        depth: true,
+        stencil: !!compatMode,
+        antialias: false,
+        premultipliedAlpha: false,
+        preserveDrawingBuffer: false,
+        desynchronized: false,
+        powerPreference: isTouch() ? 'low-power' : 'high-performance',
+        failIfMajorPerformanceCaveat: false,
+      },
+      postMainLoop: function () { noteFrame(nowMs()); },
+      print: function (t) { log(t); },
+      printErr: function (t) { log('warn ' + t); },
+      onAbort: function (what) { logError('unity abort: ' + what); },
+    };
+  }
+
+  async function instantiateUnity(loaderUrl, config) {
+    setStatus('Starting the game…');
+    currentStage = 'unity boot';
+    markStage(currentStage);
+    setProgress(0, '');
+    await loadScript(loaderUrl);
+    var instance = await window.createUnityInstance(canvas, config, function (progress) {
+      var pct = Math.round(progress * 100);
+      setStatus('Loading into memory — ' + pct + '%');
+      setProgress(progress, pct + '%');
+      currentStage = 'unity memory ' + pct + '%';
+      if (pct % 10 === 0) markStage(currentStage);
+    });
+    unityInstance = instance;
+    window.unityInstance = instance;
+    return instance;
+  }
+
+  function completeUnityBoot(instance, dataSet, wasmSet) {
+    booted = true;
+    bootedAt = nowMs();
+    currentStage = 'running';
+    clearStage();
+    releaseAwake();
+    bgWarn.classList.add('hidden');
+    screenEl.classList.add('hidden');
+    fpsEl.classList.remove('hidden');
+    applyPerf('at boot');
+    applyPad();
+    startFps();
+    startHeartbeat();
+    lastFrameSeenAt = nowMs();
+    log('game booted — ' + perfDescription() + ', canvas ' + canvas.width + '×' + canvas.height);
+    var heap = heapMB();
+    if (heap) log('game memory: ' + heap + ' MB of wasm heap');
+    toast('Tap the screen once so sound can start', 5000);
+    canvas.focus && canvas.focus();
+    setTimeout(function () {
+      try { if (dataSet && dataSet.dispose) dataSet.dispose(); } catch (e) {}
+      try { if (wasmSet && wasmSet.dispose) wasmSet.dispose(); } catch (e) {}
+    }, 5000);
+  }
+
   function onLoadProgress(p) {
     var frac = p.total ? p.loaded / p.total : 0;
     var extra = '';
@@ -2261,8 +2351,84 @@
     throw lastErr || new Error('could not load ' + label);
   }
 
+  async function loadCommunityBuild() {
+    var source = COMMUNITY_BUILD;
+    if (!source) throw new Error('the community build source was not selected');
+    BUILD = {
+      kind: 'community',
+      buildId: source.buildId,
+      integrity: {},
+      datasets: {
+        data: { total: source.fileBytes.data },
+        wasm: { total: source.fileBytes.wasm },
+        assetArchive: { total: source.assetArchive.total },
+      },
+      unity: source.unity,
+    };
+    totalBytes = source.assetArchive.total;
+    setDataMb(totalBytes);
+    refreshPerfRows();
+    log('community build ' + source.buildId + ': asset archive ' + mb(totalBytes));
+
+    setStatus('Checking iPad storage…');
+    currentStage = 'community storage check';
+    markStage(currentStage);
+    caps = await SKStream.detect();
+    log('community storage', {
+      opfs: caps.opfs,
+      availableMB: Math.round((caps.available || 0) / 1048576),
+      quotaMB: Math.round((caps.quota || 0) / 1048576),
+      secure: caps.secure,
+    });
+    if (!caps.opfs) {
+      throw new Error('Safari private/on-device storage is unavailable. Open this page in a normal Safari tab (not Private Browsing) to cache the large game archive.');
+    }
+    SKStream.requestPersistence().then(function (granted) { log('persistent storage: ' + granted); });
+
+    currentStage = 'download community assets';
+    markStage(currentStage);
+    setStatus('Downloading the game asset archive — keep Safari open on Wi-Fi');
+    var archiveSet = await SKCommunityBuild.ensureArchive(source, {
+      base: ASSET_BASE,
+      workerUrl: 'js/writer.js',
+      onStatus: function (message) { setStatus('Game assets: ' + message); },
+      onProgress: function (progress) {
+        var fraction = progress.total ? progress.loaded / progress.total : 0;
+        var eta = progress.bytesPerSecond > 0 ? ' · about ' + Math.max(1, Math.round(progress.etaSeconds / 60)) + ' min left' : '';
+        setStatus('Caching game assets on this iPad — part ' + progress.part + ' of ' + progress.parts);
+        setProgress(fraction, mb(progress.loaded) + ' / ' + mb(progress.total) + eta);
+        currentStage = 'community archive ' + Math.round(fraction * 100) + '%';
+        if (Math.round(fraction * 100) % 10 === 0) markStage(currentStage);
+      },
+      onLog: log,
+    });
+    if (!archiveSet || !archiveSet.file) {
+      throw new Error('Safari could not read the asset archive back from local storage. Free up at least 2.1 GB and try again.');
+    }
+
+    setStatus('Indexing the cached game assets…');
+    COMMUNITY_ZIP_MOUNT = await SKCommunityBuild.openArchive(archiveSet.file, window.zip);
+    log('indexed ' + COMMUNITY_ZIP_MOUNT.entryCount + ' files in the community asset ZIP');
+    SKCommunityBuild.installFetchMount(window, COMMUNITY_ZIP_MOUNT, {
+      onAsset: function (name) { log('asset from local ZIP: ' + name); },
+    });
+    try { if (archiveSet.dispose) archiveSet.dispose(); } catch (e) {}
+
+    var dataUrl = abs(source.unity.data);
+    var wasmUrl = abs(source.unity.wasm);
+    var frameworkUrl = abs(source.unity.framework);
+    var streamingAssetsUrl = abs(source.unity.streamingAssets);
+    var config = makeUnityConfig(dataUrl, wasmUrl, frameworkUrl, streamingAssetsUrl);
+    var instance = await instantiateUnity(abs(source.unity.loader), config);
+    completeUnityBoot(instance, null, null);
+  }
+
   async function loadAndBoot() {
     try {
+      if (BUILD_SOURCE === 'community') {
+        await loadCommunityBuild();
+        return;
+      }
       /* --- 0. what is this build, and is it all there? --- */
       setStatus('Checking the game data…');
       currentStage = 'read manifest';
@@ -2341,83 +2507,16 @@
       log('wasm ready via ' + wasmSet.kind + ': ' + mb(wasmSet.size));
 
       /* --- 4. Unity --- */
-      setStatus('Starting the game…');
-      currentStage = 'unity boot';
-      markStage(currentStage);
-      setProgress(0, '');
-      await loadScript(abs(BUILD.unity.loader));
-
-      var config = {
-        dataUrl: dataSet.url,
-        codeUrl: wasmSet.url,
-        frameworkUrl: BUILD.unity.frameworkUrl,
-        streamingAssetsUrl: BUILD.unity.streamingAssetsUrl,
-        companyName: 'Team Cherry',
-        productName: 'Hollow Knight Silksong',
-        productVersion: '1.0',
-        INITIAL_MEMORY: 33554432,
-        maximumHeapSize: 1468006400,
-        // No AA, no alpha, no stencil unless compatibility mode is on. Low
-        // latency presentation (desynchronized) buys nothing here and costs
-        // an extra buffer, so it is off: the less video memory the tab holds,
-        // the longer iPadOS leaves it alone.
-        webglContextAttributes: {
-          alpha: false,
-          depth: true,
-          stencil: !!compatMode,
-          antialias: false,
-          premultipliedAlpha: false,
-          preserveDrawingBuffer: false,
-          desynchronized: false,
-          powerPreference: isTouch() ? 'low-power' : 'high-performance',
-          failIfMajorPerformanceCaveat: false,
-        },
-        postMainLoop: function () { noteFrame(nowMs()); },
-        print: function (t) { log(t); },
-        printErr: function (t) { log('warn ' + t); },
-        onAbort: function (what) { logError('unity abort: ' + what); },
-      };
-      // NOTE: `memory` is intentionally not passed — this loader ignores it and
-      // the wasm module declares its own heap (32 MB initial, up to 2 GB).
-
-      var instance = await window.createUnityInstance(canvas, config, function (progress) {
-        var pct = Math.round(progress * 100);
-        setStatus('Loading into memory — ' + pct + '%');
-        setProgress(progress, pct + '%');
-        currentStage = 'unity memory ' + pct + '%';
-        if (pct % 10 === 0) markStage(currentStage);
-      });
-      unityInstance = instance;
-      window.unityInstance = instance;
+      var config = makeUnityConfig(
+        dataSet.url,
+        wasmSet.url,
+        BUILD.unity.frameworkUrl,
+        BUILD.unity.streamingAssetsUrl
+      );
+      var instance = await instantiateUnity(abs(BUILD.unity.loader), config);
 
       /* --- 5. done --- */
-      booted = true;
-      bootedAt = nowMs();
-      currentStage = 'running';
-      clearStage();
-      releaseAwake();
-      bgWarn.classList.add('hidden');
-      screenEl.classList.add('hidden');
-      fpsEl.classList.remove('hidden');
-      // Unity owns the canvas from here: make sure the render scale we
-      // picked is really the one in effect, not the size it started with.
-      // (This also gives auto-degrade a settling-in period after the boot.)
-      applyPerf('at boot');
-      applyPad();
-      startFps();
-      startHeartbeat();
-      lastFrameSeenAt = nowMs();
-      log('game booted — ' + perfDescription() + ', canvas ' + canvas.width + '×' + canvas.height);
-      var heap = heapMB();
-      if (heap) log('game memory: ' + heap + ' MB of wasm heap');
-      toast('Tap the screen once so sound can start', 5000);
-      canvas.focus && canvas.focus();
-
-      // The URL is no longer needed once Unity has copied the data.
-      setTimeout(function () {
-        try { dataSet.dispose(); } catch (e) {}
-        try { wasmSet.dispose(); } catch (e) {}
-      }, 5000);
+      completeUnityBoot(instance, dataSet, wasmSet);
     } catch (err) {
       releaseAwake();
       var message = (err && err.message) || String(err);

@@ -30,7 +30,7 @@ try {
  * ---------------------------------------------------------------- */
 
 const html = fs.readFileSync(path.join(WEB, 'play.html'), 'utf8');
-const libs = ['js/stream.js', 'js/manifest.js', 'js/save-codec.js', 'js/boss-scenes.js'].map((rel) =>
+const libs = ['js/stream.js', 'js/manifest.js', 'js/community-build.js', 'js/save-codec.js', 'js/boss-scenes.js'].map((rel) =>
   fs.readFileSync(path.join(WEB, ...rel.split('/')), 'utf8')
 );
 // The inline script is what runs the game page: pull it out so the libraries can
@@ -146,7 +146,7 @@ await test('the touch pad is on for a touch device and off for a desktop', () =>
 });
 
 await test('a missing game build is explained and Start is disabled', async () => {
-  const win = bootPage(); // the default fetch stub returns 404 for the build files
+  const win = bootPage(); // the default fetch stub returns 404 for local and community builds
   await new Promise((resolve) => setTimeout(resolve, 0));
   const missing = win.document.getElementById('buildMissing');
   const start = win.document.getElementById('startBtn');
@@ -155,6 +155,32 @@ await test('a missing game build is explained and Start is disabled', async () =
   ok(!missing.classList.contains('hidden'), 'the missing-build help is shown');
   ok(missing.querySelector('a[href="BUILD.md"]'), 'build instructions are linked');
   ok(missing.querySelector('a[href="demo.html"]'), 'the no-build loader demo is linked');
+  win.close();
+});
+
+await test('the pinned community source enables Start and warns about its first-run download', async () => {
+  const source = JSON.parse(fs.readFileSync(path.join(WEB, 'community-build.json'), 'utf8'));
+  const fetchImpl = async (url) => {
+    const clean = String(url).replace(/^https?:\/\/[^/]+\//, '');
+    if (clean === 'community-build.json') {
+      return { ok: true, status: 200, json: async () => source };
+    }
+    return { ok: false, status: 404, headers: new Map(), text: async () => '' };
+  };
+  const win = bootPage({ fetchImpl });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  eq(win.document.getElementById('startBtn').disabled, false, 'community build can start');
+  ok(/1986\.6 MB/.test(win.document.getElementById('sub').textContent), 'first-run archive size is shown');
+  eq(win.SKPerf.internals().buildSource(), 'community', 'the community adapter is selected');
+  ok(/cdn\.jsdelivr\.net/.test(win.SKPerf.internals().assetBase()), 'the build source uses the pinned CDN base');
+  win.close();
+});
+
+await test('a prepared manifest takes priority over the community fallback', async () => {
+  const win = bootPage({ fetchImpl: manifestFetch(MANIFEST) });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  eq(win.SKPerf.internals().buildSource(), 'prepared', 'the local prepared build remains selected');
+  eq(win.document.getElementById('startBtn').disabled, false, 'the prepared build can start');
   win.close();
 });
 

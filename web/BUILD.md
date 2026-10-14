@@ -1,7 +1,8 @@
 # Building and preparing the web port
 
-Everything the browser needs is produced by three scripts in `web/tools/`. None
-of them touch your game installation — the input build is only ever read.
+For a prepared Unity build, the scripts in `web/tools/` validate and package
+its browser assets. They never touch the game installation — the input build is
+only ever read. The default community source is described separately below.
 
 ```
 prepare-build.mjs   check → prune → replace cutscenes → patch → chunk → manifest
@@ -12,19 +13,23 @@ make-fixture-build.mjs   a synthetic build, for tests and for demo.html
 
 GitHub Pages publishes this repository's root. The root `index.html` sends the
 project homepage to `web/play.html` while preserving the query and hash, and the
-root `.nojekyll` file prevents Jekyll from transforming the site. Until a real
-Unity WebGL build is prepared and published, the play page says **Game build not
-found**, disables **Start**, and links back to this guide and `demo.html`. That
-is the expected state: the demo tests the loader without pretending the game is
-available.
+root `.nojekyll` file prevents Jekyll from transforming the site. The page first
+uses a prepared `web/Build/build-manifest.json` when one is present. If not, it
+uses the pinned community WebGL source in `web/community-build.json`: Unity's
+small compressed entry points are loaded from that source, and its roughly
+1.94 GiB Addressables ZIP is streamed into OPFS and read bundle-by-bundle. The
+game payload is not copied into this Git repository. See
+[`COMMUNITY-BUILD.md`](COMMUNITY-BUILD.md) for storage, network, and source
+notes. `?community=0` disables this fallback; with no local build, the page then
+shows **Game build not found** and links to this guide and `demo.html`.
 
 ---
 
 ## 1. You need a Unity WebGL build
 
-This repository does not contain the game. It has the RL mods (`mods/`), the
-trainer (`trainer/`) and this port (`web/`). `play.html` will stream and boot
-anything that looks like a Unity WebGL build, so the one missing ingredient is:
+This repository contains the RL mods (`mods/`), the trainer (`trainer/`) and
+the web port (`web/`), but not Silksong's original Unity project. For a prepared
+local build, the tools expect Unity's WebGL output to look like this:
 
 ```
 Build/
@@ -35,13 +40,13 @@ Build/
   StreamingAssets/…
 ```
 
-That folder comes out of Unity's **WebGL build target**. Silksong is a
-proprietary, IL2CPP/Mono C# Unity game, so producing a WebGL build means having
-the project in Unity and pressing Build — it cannot be derived from the
-installed game, from a decompilation, or from this repository. The port is built
-to accept that build the moment it exists, and `web/tools/make-fixture-build.mjs`
-produces a stand-in with the same shape so the pipeline, the loader and the page
-can all be tested and demonstrated today:
+That layout comes from Unity's **WebGL build target**; it cannot be produced
+from an installed PC/console game or from this repository alone. The page now
+also supports the separately prepared community WebGL source described above.
+That source has a different compressed build/Addressables layout, so it is
+loaded by the community adapter rather than by `prepare-build.mjs`. The fixture
+below remains synthetic and is only for testing the generic preparation
+pipeline — it does not contain game content:
 
 ```bash
 node web/tools/make-fixture-build.mjs --out /tmp/unity-build --filler 40MB
@@ -95,10 +100,11 @@ node web/tools/verify-build.mjs [--quick] [--json]
    `StreamingAssets/` are present;
 7. the page itself is complete (`play.html`, `js/*`).
 
-Exit code 0 means the build is complete and matches the manifest; 1 means
-something is wrong and the message says what. The page performs a cheaper
-version of the same check before it downloads anything (one `Range` request per
-chunk).
+Exit code 0 means the prepared build is complete and matches its manifest; 1
+means something is wrong and the message says what. For prepared builds, the
+page performs a cheaper version before downloading (one `Range` request per
+chunk). The community mode instead checks its pinned descriptor and exact part
+sizes, then lets zip.js validate/read the archive directory.
 
 ---
 
