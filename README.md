@@ -41,27 +41,28 @@ just train --timesteps 200000 --run-name moss-mother-a
 
 ## 网页版 (iPad Safari)
 
-`web/` 是把游戏放进 iPad 浏览器的移植层. 做法的来源是同一个作者的空洞骑士网页版
-(`kinggerb/hollowknightgame`): **分块下载 → 直接写进设备上的 OPFS → 只把一整份文件交给
-Unity**, 全程不在内存里拼装, 所以下载过程中峰值内存只有几 MB 而不是几 GB; 第二次打开
-不下任何数据. 另外还有画质档位 (100 % → 25 % 渲染分辨率 + 帧率上限 + 自动降档), 崩溃
+`web/` 是把游戏放进 iPad 浏览器的移植层. 准备版构建会把数据分块流式写进设备 OPFS，再交给
+Unity；默认社区构建则把 Addressables ZIP 分片缓存到 OPFS，按需提取资源。两条路径都避免在内存里
+拼装多 GiB 文件，并会复用已缓存的数据。另外还有画质档位 (100 % → 25 % 渲染分辨率 + 帧率上限 + 自动降档), 崩溃
 阶梯 (上次被系统杀掉就下次自动降一档), 硬性内存上限, 音频守卫, 以及把过场视频换成几百
 字节的黑屏占位 (构建时替换, 顺带瘦身几百 MB).
 
 ```shell
 cd web
-npm install                      # 只有 jsdom, 给页面测试用
-npm test                         # 6 个测试套件, 76 个用例
+npm install                      # jsdom, 给页面测试用
+npm test                         # 全部测试套件
 
 node tools/serve.mjs 8080        # 静态服务器 (支持 Range + wasm MIME), iPad 直接访问
-node tools/make-fixture-build.mjs   # 造一份假构建, 用 demo.html 验证加载器
+node tools/make-fixture-build.mjs   # 造一份假构建, 用 demo.html 验证通用加载器
 ```
 
-页面 (`web/play.html`) 需要一份 **Unity WebGL 构建** (`Build/*.loader.js|framework.js|wasm|data`)
-才能真正开始游戏; 这个仓库里没有这份构建, 怎么产出, 怎么处理, 怎么校验见
-`web/BUILD.md`, 实机使用与画质档位见 `web/IPAD.md`.
+页面默认使用 `web/community-build.json` 中固定版本的社区 WebGL 构建。游戏文件不会被复制进本仓库：
+Unity 入口文件从构建源 CDN 加载，约 1.94 GiB 的 Addressables 分片会在首次启动时流式写入 iPad 的 OPFS，
+之后由 `zip.js` 按需读取资源。首次启动需要 Wi-Fi、普通 Safari 浏览标签页和约 2 GiB 可用存储；
+具体来源、版本和限制见 `web/COMMUNITY-BUILD.md`。如果有本地或自托管的标准 Unity WebGL 构建，
+`web/play.html` 会优先使用它；准备与校验方法见 `web/BUILD.md`，实机使用与画质档位见 `web/IPAD.md`.
 
 GitHub Pages 的仓库根地址 `https://kinggerb.github.io/silksongcode/` 由根目录的
 `index.html` 转到 `web/play.html`（保留查询参数和 hash），`.nojekyll` 则让 Pages 原样提供文件。
-在 Unity WebGL 构建发布前, 页面会明确显示 **Game build not found**, 禁用 Start, 并链接到
-`web/BUILD.md` 和无需游戏构建即可运行的 `web/demo.html`；这是预期状态, 不是可启动的游戏。
+若关闭社区构建回退（`?community=0`）且没有标准构建，页面会明确显示 **Game build not found** 并禁用 Start；
+`web/demo.html` 仍可在不下载游戏的情况下测试通用加载器。

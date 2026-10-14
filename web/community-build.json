@@ -1,0 +1,427 @@
+{
+  "schema": 1,
+  "source": "https://github.com/web-ports/hollow-knight-silksong",
+  "commit": "bcbe014765f2f6ca4b1d82ac25755a0299a600ab",
+  "base": "https://cdn.jsdelivr.net/gh/web-ports/hollow-knight-silksong@bcbe014765f2f6ca4b1d82ac25755a0299a600ab/",
+  "buildId": "web-ports-silksong-bcbe014",
+  "unity": {
+    "loader": "Build/w-pt.loader.js",
+    "framework": "Build/w-pt.framework.js.unityweb",
+    "data": "Build/w-pt.data.unityweb",
+    "wasm": "Build/w-pt.wasm.unityweb",
+    "streamingAssets": "StreamingAssets"
+  },
+  "assetArchive": {
+    "cacheKey": "webgl-assets-bcbe014.zip",
+    "total": 2083139638,
+    "mime": "application/zip",
+    "parts": [
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part1",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part2",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part3",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part4",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part5",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part6",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part7",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part8",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part9",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part10",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part11",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part12",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part13",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part14",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part15",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part16",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part17",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part18",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part19",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part20",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part21",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part22",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part23",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part24",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part25",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part26",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part27",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part28",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part29",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part30",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part31",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part32",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part33",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part34",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part35",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part36",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part37",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part38",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part39",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part40",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part41",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part42",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part43",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part44",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part45",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part46",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part47",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part48",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part49",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part50",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part51",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part52",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part53",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part54",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part55",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part56",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part57",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part58",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part59",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part60",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part61",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part62",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part63",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part64",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part65",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part66",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part67",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part68",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part69",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part70",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part71",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part72",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part73",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part74",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part75",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part76",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part77",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part78",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part79",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part80",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part81",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part82",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part83",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part84",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part85",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part86",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part87",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part88",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part89",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part90",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part91",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part92",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part93",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part94",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part95",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part96",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part97",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part98",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part99",
+        "bytes": 20866662
+      },
+      {
+        "path": "StreamingAssets/aa/WebGL.zip.part100",
+        "bytes": 17340100
+      }
+    ]
+  },
+  "fileBytes": {
+    "loader": 118453,
+    "framework": 104039,
+    "data": 15288449,
+    "wasm": 20192325
+  }
+}
