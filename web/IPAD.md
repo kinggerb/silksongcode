@@ -197,6 +197,22 @@ chunks at `partOffset` instead of `partOffset + skip`, so an interrupted downloa
 silently shifted the tail of the file. `js/stream.js` here fixes that (and
 `test-stream.mjs` covers it) — worth back-porting there.
 
+A second one, this time in the size check: comparing the manifest against the
+response's `Content-Length` looks like a cheap way to catch a stale deploy before
+downloading 2 GiB, but a cross-origin CDN is allowed to put a transfer encoding
+on the answer. Then `Content-Length` describes the *encoded* body while
+`response.body` yields *decoded* bytes, and `Content-Encoding` is not a
+CORS-safelisted header — the page cannot even read it to tell the two apart. The
+community build streams from jsDelivr, so a compressed part aborted a perfectly
+good download with `part N is X bytes on the server but Y in the manifest —
+rebuild or re-run prepare-build.mjs`, which the page also treats as permanent, so
+there was no retry. `js/stream.js` now trusts the header only when it claims
+*more* than the manifest (compression cannot do that) and otherwise decides on
+the bytes that actually arrive: an oversized part is refused as soon as it
+overruns the manifest, a short one still fails with `ended early`. Do not
+"fix" a size mismatch by re-running `prepare-build.mjs` unless the server really
+is serving a different file than the one that was chunked.
+
 ## 10. What is still a limit of the port
 
 Unity still holds the data archive plus its own WebAssembly heap inside one tab.
