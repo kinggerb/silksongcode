@@ -40,7 +40,7 @@
 })(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
 
-  var VERSION = '1.0.2';
+  var VERSION = '1.0.3';
   var DEFAULT_DIR = 'silksong-webgl-cache';
   var FLUSH_EVERY = 32 * 1024 * 1024; // flush OPFS about every 32 MB
   var MAX_RETRIES = 4; // per part (positional sinks only)
@@ -440,6 +440,40 @@
    * ------------------------------------------------------------------ */
 
   /**
+   * Can this response's Content-Length be compared with the manifest as-is?
+   *
+   * Only when nothing can have transformed the body between the file on the
+   * server and the bytes res.body hands us. A content coding (gzip, br, …)
+   * makes Content-Length the size of the *coded* body, and that lands on either
+   * side of the file size: compressible data shrinks, but an incompressible
+   * part — every ZIP part of the community build — only gains the coding's
+   * framing. jsDelivr does exactly that: part 1 of the community build is
+   * 20866662 bytes and is announced as 20866707.
+   *
+   * So a readable Content-Encoding other than `identity` means no. Not seeing
+   * one only proves something when every header is visible: in Node (the
+   * tests — there is no `location`) and for a same-origin URL. Cross-origin,
+   * CORS hides Content-Encoding (it is not CORS-safelisted) but still exposes
+   * Content-Length, so a coded response looks exactly like a plain one; a URL
+   * that cannot be resolved is not trusted either.
+   */
+  function contentLengthIsTruthful(url, res) {
+    var encoding = null;
+    try {
+      encoding = res && res.headers && typeof res.headers.get === 'function' ? res.headers.get('content-encoding') : null;
+    } catch (e) {
+      encoding = null;
+    }
+    if (encoding && String(encoding).trim().toLowerCase() !== 'identity') return false;
+    if (typeof location === 'undefined') return true; // Node: nothing is hidden from us
+    try {
+      return new URL(url, location.href).origin === location.origin;
+    } catch (e) {
+      return false; // cannot tell where it came from, so cannot rule a transform out
+    }
+  }
+
+  /**
    * One attempt at streaming a part into the sink.
    * p = {url, bytes, index, sink, partOffset, skip, signal, fetchImpl,
    *      progress, onAdvance, log, expectDigest}
@@ -453,8 +487,8 @@
     // has to be caught here instead of inside Unity, where it shows up as a
     // black screen. The Content-Length header alone cannot decide that, though.
     //
-    // A cross-origin CDN (jsDelivr for the community build) may put a transfer
-    // encoding on the response, and then Content-Length describes the *encoded*
+    // A cross-origin CDN (jsDelivr for the community build) may put a content
+    // coding on the response, and then Content-Length describes the *coded*
     // body while res.body hands us *decoded* bytes. Content-Encoding is not a
     // CORS-safelisted header, so a page like this one cannot even read it to
     // tell the two cases apart. Comparing the two sizes up front therefore
@@ -462,26 +496,32 @@
     // prepare-build.mjs", which is also flagged as non-retryable — the load
     // died on a part that was fine.
     //
-    // So the header is only trusted when the disagreement cannot be an encoding
-    // artefact: compression only ever shrinks the wire size, so a declared size
-    // *above* the manifest is a genuine mismatch and is still refused before a
-    // single byte is written. Every other case is settled by counting the bytes
-    // that actually arrive below, which rejects a short part and an oversized
-    // one just as firmly.
+    // 1.0.1 still refused a declared size *above* the manifest, on the theory
+    // that compression only ever shrinks the wire size. It does not: an
+    // incompressible part only gains the coding's framing, and jsDelivr
+    // announces the community build's 20866662-byte part 1 as 20866707 bytes.
+    // So the header may only fail a part when it cannot have been transformed
+    // (contentLengthIsTruthful above). Any other disagreement, in either
+    // direction, is logged and settled by counting the bytes that actually
+    // arrive below, which rejects a short part and an oversized one just as
+    // firmly.
     var log = makeLogger(p.log);
     if (p.bytes > 0 && res.headers && typeof res.headers.get === 'function') {
       var declared = Number(res.headers.get('content-length') || 0) || 0;
-      if (declared > p.bytes) {
-        throw new Error(
-          'part ' + p.index + ' is ' + declared + ' bytes on the server but only ' + p.bytes +
-            ' in the manifest — rebuild or re-run prepare-build.mjs'
-        );
-      }
-      if (declared && declared < p.bytes) {
-        log(
-          'part ' + p.index + ': the server announced ' + declared + ' bytes for a ' + p.bytes +
-            ' byte part (a compressed transfer does that) — checking the bytes as they arrive'
-        );
+      if (declared && declared !== p.bytes) {
+        var truthful = contentLengthIsTruthful(p.url, res);
+        if (declared > p.bytes && truthful) {
+          throw new Error(
+            'part ' + p.index + ' is ' + declared + ' bytes on the server but only ' + p.bytes +
+              ' in the manifest — rebuild or re-run prepare-build.mjs'
+          );
+        }
+        if (!truthful) {
+          log(
+            'part ' + p.index + ': the server announced ' + declared + ' bytes for a ' + p.bytes +
+              ' byte part (a compressed transfer does that) — checking the bytes as they arrive'
+          );
+        }
       }
     }
 
@@ -1303,6 +1343,7 @@
       MemorySink: MemorySink,
       streamAll: streamAll,
       fetchPartOnce: fetchPartOnce,
+      contentLengthIsTruthful: contentLengthIsTruthful,
       fetchPartTo: fetchPartTo,
       sleep: sleep,
       noop: noop,
