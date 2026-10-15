@@ -241,6 +241,29 @@ tabs or clear the cache rather than anything about the cache being broken.
 `test-stream.mjs` pins all of it — do not "simplify" any of this back to a
 single open attempt.
 
+A fourth one, and a correction to the second: "trust `Content-Length` when it
+claims *more* than the manifest, compression cannot do that" is wrong. A content
+coding only shrinks data that compresses; on incompressible data it just adds its
+own framing, and every ZIP part of the community build is incompressible.
+jsDelivr's edge content-codes them anyway, so the wire body comes out up to ~45
+bytes *larger* than the file: part 1, correctly 20866662 bytes in the manifest,
+is announced as 20866707, and loaders 1.0.1–1.0.2 refused it before its first
+byte with `part 1 is 20866707 bytes on the server but only 20866662 in the
+manifest — rebuild or re-run prepare-build.mjs` — permanent again, no retry.
+Since 1.0.3 the rule is: `Content-Length` may only fail a part up front when no
+hidden transform is possible — no readable `Content-Encoding` other than
+`identity`, *and* every header visible, which means a same-origin URL (or Node,
+in the tests). Cross-origin, CORS hides `Content-Encoding` but still exposes
+`Content-Length`, so a coded answer looks exactly like a plain one. Any other
+disagreement, in either direction, only logs `part N: the server announced X
+bytes for a Y byte part (a compressed transfer does that) — checking the bytes as
+they arrive`, and counting the bytes that arrive stays the guard everywhere: a
+part that really overruns the manifest still fails with `bigger than the
+manifest`, a short one with `ended early`. A player who hit the refusal has
+nothing to resume from (it came before part 1's first byte was written), so the
+first load on 1.0.3 downloads the archive from zero. Again: do not "fix" this by
+re-running `prepare-build.mjs` — the manifest was right all along.
+
 ## 10. What is still a limit of the port
 
 Unity still holds the data archive plus its own WebAssembly heap inside one tab.

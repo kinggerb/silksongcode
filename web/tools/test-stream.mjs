@@ -10,6 +10,13 @@
  * cache invalidation when the build id changes, sampled verification, and the
  * manifest → chunk list conversion.
  *
+ * Plus a content coding that makes the wire size *larger* than the part — what
+ * jsDelivr does to the community build's incompressible ZIP parts (part 1 is
+ * announced 45 bytes over its real 20866662): such a part still loads, a part
+ * that really is oversized behind a coding is still refused on the bytes that
+ * arrive, and Content-Length is only allowed to fail a part up front when no
+ * hidden transform is possible (no content coding, every header visible).
+ *
  * Plus the exclusive OPFS cache lock: a cache file still locked by a previous
  * holder (WebKit's InvalidStateError and Chromium's NoModificationAllowedError
  * spellings alike) is retried for a few seconds instead of failing the load, a
@@ -215,8 +222,9 @@ await test('reports progress with a part counter and a throughput estimate', asy
 section('checking the data');
 
 await test('a chunk the server reports as bigger than the manifest is refused, not written', async () => {
-  // Compression can only shrink the wire size, so a declared size *above* the
-  // manifest is a real mismatch: refuse it before a single byte reaches disk.
+  // No content coding and every header visible (Node here, a same-origin build
+  // in a browser): Content-Length is the file size, so a declared size *above*
+  // the manifest is a real mismatch — refuse it before a single byte reaches disk.
   const dir = path.join(TMP, 'mismatch');
   await fsp.mkdir(dir, { recursive: true });
   const { parts } = writeChunks(dir, 1, 256);
@@ -341,6 +349,110 @@ await test('a CDN that compresses the transfer loads fine despite a smaller Cont
     'the encoded transfer was noticed in the log instead of being fatal'
   );
   server.stop();
+});
+
+await test('a compressed transfer whose wire size is LARGER than the part still loads', async () => {
+  // The bug 1.0.3 fixes, as the iPad hit it with the community build: jsDelivr
+  // puts a content coding on the incompressible ZIP parts, and a coding that
+  // cannot shrink the data only adds its own framing — part 1 (20866662 bytes)
+  // is announced as 20866707. 1.0.1 took "declared > manifest" as proof of a
+  // stale deploy and refused the part before its first byte with "rebuild or
+  // re-run prepare-build.mjs"; cross-origin the page cannot even see the
+  // Content-Encoding that explains it.
+  const dir = path.join(TMP, 'encoded-larger');
+  await fsp.mkdir(dir, { recursive: true });
+  const { parts, expected } = writeChunks(dir, 3, 512);
+  const server = await serveDir(dir);
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url, opts) => {
+    const res = await realFetch(url, opts);
+    const headers = new Headers(res.headers);
+    const real = Number(headers.get('content-length') || 0);
+    if (real) headers.set('content-length', String(real + 45));
+    headers.set('content-encoding', 'br');
+    return new Response(res.body, { status: res.status, statusText: res.statusText, headers });
+  };
+  try {
+    const sink = new FakeOpfsSink({ name: 'el.bin' });
+    const set = await run({
+      sink,
+      ensure: {
+        parts: parts.map((p) => ({ url: server.url + p.url, bytes: p.bytes })),
+        expectedSize: expected.length,
+        cacheKey: 'el.bin',
+        buildId: 'b',
+      },
+    });
+    eq(set.size, expected.length, 'the archive assembled to the manifest size');
+    ok(sink.buffer.equals(expected), 'and its bytes are the decoded ones, byte for byte');
+    ok(sink.files.get('el.bin.ok').startsWith('b'), 'completion marker written');
+    ok(
+      logs.includes(
+        'part 1: the server announced 557 bytes for a 512 byte part (a compressed transfer does that)' +
+          ' — checking the bytes as they arrive'
+      ),
+      'the larger wire size was logged instead of being fatal: ' + logs.join(' | ')
+    );
+  } finally {
+    globalThis.fetch = realFetch;
+    server.stop();
+  }
+});
+
+await test('a genuinely oversized part hiding behind a content-encoding is refused on the bytes', async () => {
+  // The other half of the bargain: once a coded Content-Length can no longer
+  // fail a part up front, a part that really is bigger than the manifest must
+  // still be caught — by counting what arrives — and still as a permanent
+  // mismatch, not something to burn the retry budget on.
+  const dir = path.join(TMP, 'encoded-oversize');
+  await fsp.mkdir(dir, { recursive: true });
+  const { parts } = writeChunks(dir, 1, 512);
+  const server = await serveDir(dir);
+  const realFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async (url, opts) => {
+    calls++;
+    const res = await realFetch(url, opts);
+    const headers = new Headers(res.headers);
+    const real = Number(headers.get('content-length') || 0);
+    if (real) headers.set('content-length', String(real + 45));
+    headers.set('content-encoding', 'br');
+    return new Response(res.body, { status: res.status, statusText: res.statusText, headers });
+  };
+  try {
+    const sink = new FakeOpfsSink({ name: 'eo.bin' });
+    const message = await rejects(
+      run({
+        sink,
+        ensure: {
+          parts: [{ url: server.url + parts[0].url, bytes: 256 }], // the file really is 512
+          expectedSize: 256,
+          cacheKey: 'eo.bin',
+          buildId: 'b',
+        },
+      }),
+      /bigger than the manifest/,
+      'loading an oversized part behind a content coding'
+    );
+    ok(/bytes received, 256 expected/.test(message), 'the message names the manifest size: ' + message);
+    eq(calls, 1, 'a manifest mismatch is permanent, so it was not retried');
+    ok(!sink.files.has('eo.bin.ok'), 'no completion marker for a refused part');
+  } finally {
+    globalThis.fetch = realFetch;
+    server.stop();
+  }
+});
+
+await test('Content-Length is only trusted when a hidden transform is impossible', () => {
+  const truthful = SKStream._internals.contentLengthIsTruthful;
+  eq(typeof truthful, 'function', 'contentLengthIsTruthful is exposed on _internals');
+  const url = 'http://127.0.0.1:1/Build/game.data.part1';
+  const plain = new Response('x', { headers: { 'content-length': '1' } });
+  eq(truthful(url, plain), true, 'no content coding and every header visible: it is the file size');
+  const br = new Response('x', { headers: { 'content-length': '46', 'content-encoding': 'br' } });
+  eq(truthful(url, br), false, 'a content coding: it is the wire size, which may be bigger or smaller');
+  const identity = new Response('x', { headers: { 'content-length': '1', 'content-encoding': 'identity' } });
+  eq(truthful(url, identity), true, '"identity" is no transform at all');
 });
 
 await test('a short chunk fails the load and leaves no completion marker', async () => {
