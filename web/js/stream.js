@@ -40,7 +40,7 @@
 })(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
 
-  var VERSION = '1.0.1';
+  var VERSION = '1.0.2';
   var DEFAULT_DIR = 'silksong-webgl-cache';
   var FLUSH_EVERY = 32 * 1024 * 1024; // flush OPFS about every 32 MB
   var MAX_RETRIES = 4; // per part (positional sinks only)
@@ -805,6 +805,98 @@
     }
   }
 
+  /* ------------------------------------------------------------------ *
+   * The exclusive OPFS lock, and why opening has to be retried
+   * ------------------------------------------------------------------ *
+   * A FileSystemSyncAccessHandle (and a FileSystemWritableFileStream) takes an
+   * EXCLUSIVE lock on its file: while one is open, the next open of the same
+   * file is refused. Browsers release that lock asynchronously when the holder
+   * goes away, so there is a window where the file is still locked although
+   * nothing is using it any more:
+   *
+   *   - this page's own "Try again" button does a location.reload(); the new
+   *     page asks for the cache file while WebKit is still letting go of the
+   *     previous page's worker;
+   *   - a tab that iPadOS jetsam-killed mid-download never ran close();
+   *   - a second Safari tab on the same site holds the lock for as long as it
+   *     is open.
+   *
+   * Safari reports the refusal as "InvalidStateError: The object is in an
+   * invalid state." and Chromium as NoModificationAllowedError. Neither means
+   * the cache is corrupt, and neither is worth showing a player as a dead end,
+   * so the open is retried for a few seconds before it is called a failure.
+   */
+
+  // Mutable (and exposed on _internals) so the tests can exercise both the
+  // retry and the give-up path without waiting out the real backoff.
+  var OPEN_LOCK = { attempts: 6, delay: 500 }; // delay is multiplied by the attempt number
+
+  /** Is this failure "somebody else is still holding the file"? */
+  function isLockRefusal(err) {
+    var name = String((err && err.name) || '');
+    var message = String((err && err.message) || err);
+    return (
+      name === 'InvalidStateError' ||
+      name === 'NoModificationAllowedError' ||
+      /another open access handle|already open|invalid state|writable stream associated/i.test(message)
+    );
+  }
+
+  /**
+   * `sink.open()`, retried while the file is still locked by a previous holder.
+   * Every sink type benefits: the writer worker and the main-thread
+   * createWritable() path both hit the same exclusive lock.
+   */
+  async function openSinkWithRetry(sink, resume, opts, log) {
+    var attempts = Math.max(1, OPEN_LOCK.attempts | 0);
+    var last = null;
+    for (var attempt = 1; attempt <= attempts; attempt++) {
+      if (opts.signal && opts.signal.aborted) throw abortError();
+      try {
+        return await sink.open(resume);
+      } catch (err) {
+        if (err && err.name === 'AbortError') throw err;
+        if (!isLockRefusal(err) || attempt >= attempts) throw err;
+        last = err;
+        var wait = Math.max(0, OPEN_LOCK.delay | 0) * attempt;
+        log(
+          'the cache file is still locked (' + ((err && err.name) || 'Error') + ': ' +
+            ((err && err.message) || err) + ') — waiting ' + wait + 'ms for the previous holder to let go' +
+            ' (attempt ' + attempt + '/' + attempts + ')'
+        );
+        if (opts.onStatus) opts.onStatus('waiting for the cached file to be released…');
+        if (wait > 0) await sleep(wait, opts.signal);
+      }
+    }
+    throw last || new Error('could not open the cache file');
+  }
+
+  /** Turn an open failure into something a player can act on. */
+  function describeOpenFailure(err, cacheKey) {
+    var name = err && err.name && err.name !== 'Error' ? err.name + ': ' : '';
+    var detail = (err && err.message) || String(err);
+    if (isLockRefusal(err)) {
+      return (
+        'the cached game file is still locked by another Safari tab, or by the page you just left (' +
+        name + detail + '). Close every other tab of this site and reload; a tab that iOS killed ' +
+        'mid-download can hold the file for a few seconds. If it still will not open, ' +
+        'Menu ▸ Clear cached game data starts the download over.'
+      );
+    }
+    // Keep the DOMException name in the message: "the object is in an invalid
+    // state" on its own says nothing about which call failed or why.
+    return 'could not open the cache file ' + cacheKey + ' (' + name + detail + ')';
+  }
+
+  /** Release a sink without ever letting the cleanup itself fail the load. */
+  async function quietAbort(sink) {
+    try {
+      if (sink && typeof sink.abort === 'function') await sink.abort();
+    } catch (e) {
+      /* the load already failed; a failed cleanup must not replace that error */
+    }
+  }
+
   /**
    * Read the assembled file back so it can be verified and handed to Unity.
    * The sink is asked first (an injected sink may hold the data itself); OPFS
@@ -868,17 +960,21 @@
       try {
         return await runDiskSession(opts, sink, dirName, expectedSize, log);
       } catch (err) {
+        // Whatever went wrong, let go of the sink FIRST. An OPFS sync access
+        // handle (and a createWritable stream) is an exclusive lock on the cache
+        // file, and abandoning it is what turns one failed download into
+        // "the object is in an invalid state" on the next attempt: the page's
+        // "Try again" button reloads, and the new page asks for the file while
+        // WebKit is still releasing the old holder. WorkerSink.abort() sends
+        // 'quit', which flushes and close()s the handle properly instead of
+        // leaving the browser to reap it after terminate().
+        await quietAbort(sink);
         if (err && err.name === 'AbortError') throw err;
         // Setup problems (no sync handle / blocked OPFS) can fall back to RAM;
         // a failed download must not silently retry in RAM.
         if (err && err.setupFailure && opts.allowMemoryFallback !== false) {
           log('disk cache unavailable: ' + err.message + ' — falling back to memory');
           if (opts.onStatus) opts.onStatus('disk cache unavailable, loading into memory');
-          try {
-            await sink.abort();
-          } catch (e) {
-            /* ignore */
-          }
         } else {
           throw err;
         }
@@ -1045,9 +1141,10 @@
 
     var opened;
     try {
-      opened = await sink.open(resumeAt > 0);
+      opened = await openSinkWithRetry(sink, resumeAt > 0, opts, log);
     } catch (err) {
-      throw setup('could not open the cache file: ' + ((err && err.message) || err));
+      if (err && err.name === 'AbortError') throw err;
+      throw setup(describeOpenFailure(err, opts.cacheKey));
     }
 
     var startOffset = opened.canResume ? opened.size : 0;
@@ -1209,6 +1306,10 @@
       fetchPartTo: fetchPartTo,
       sleep: sleep,
       noop: noop,
+      OPEN_LOCK: OPEN_LOCK,
+      isLockRefusal: isLockRefusal,
+      describeOpenFailure: describeOpenFailure,
+      quietAbort: quietAbort,
     },
   };
 });
