@@ -9,6 +9,13 @@
  * resume from what is already on disk, cache reuse with the completion marker,
  * cache invalidation when the build id changes, sampled verification, and the
  * manifest → chunk list conversion.
+ *
+ * Plus the exclusive OPFS cache lock: a cache file still locked by a previous
+ * holder (WebKit's InvalidStateError and Chromium's NoModificationAllowedError
+ * spellings alike) is retried for a few seconds instead of failing the load, a
+ * permanently locked file produces a message a player can act on, and a failed
+ * or cancelled download releases the lock on the way out instead of leaving
+ * the file stuck for the *next* attempt.
  * ==========================================================================*/
 
 import { section, test, eq, ok, close, rejects, done, serveDir, tmpDir } from './testkit.mjs';
@@ -96,6 +103,51 @@ class FakeOpfsSink {
     if (name === this.name) this.buffer = null;
     this.files.delete(name);
   }
+}
+
+/* A sink whose open() refuses the exclusive OPFS lock the way a real browser
+ * does while a previous holder has not let go yet: WebKit says
+ * InvalidStateError ("The object is in an invalid state."), Chromium says
+ * NoModificationAllowedError. It also counts aborts, which is how a test can
+ * see whether the loader released the lock after a failure. */
+class LockySink extends FakeOpfsSink {
+  constructor(opts = {}) {
+    super(opts);
+    this.lockFailures = opts.lockFailures || 0; // Infinity = never lets go
+    this.lockName = opts.lockName || 'InvalidStateError';
+    this.lockMessage = opts.lockMessage || 'The object is in an invalid state.';
+    this.openAttempts = 0;
+    this.aborts = 0;
+  }
+  async open(resume) {
+    this.openAttempts++;
+    if (this.lockFailures > 0) {
+      this.lockFailures--;
+      const err = new Error(this.lockMessage);
+      err.name = this.lockName;
+      throw err;
+    }
+    return super.open(resume);
+  }
+  async abort() {
+    this.aborts++;
+    return super.abort();
+  }
+}
+
+/* Keep the lock backoff out of the test runtime: the real one waits seconds.
+ * A loader that predates the retry has no OPEN_LOCK to tune, so this becomes a
+ * no-op and the tests then fail on behaviour instead of on a missing internal. */
+function fastLockRetries(attempts = 5) {
+  const lock = SKStream._internals.OPEN_LOCK;
+  if (!lock) return () => {};
+  const saved = { attempts: lock.attempts, delay: lock.delay };
+  lock.attempts = attempts;
+  lock.delay = 0;
+  return () => {
+    lock.attempts = saved.attempts;
+    lock.delay = saved.delay;
+  };
 }
 
 const logs = [];
@@ -344,6 +396,157 @@ await test('a missing chunk that comes back on a retry is tolerated', async () =
   eq(failures, 1, 'the flaky chunk really failed once');
   eq(set.size, expected.length, 'the file still assembled fully');
   ok(sink.buffer.equals(expected), 'and its bytes are right');
+  server.stop();
+});
+
+section('the exclusive cache lock');
+
+await test('a cache file still locked by the previous session opens on a retry', async () => {
+  // What Safari does after a reload: the page that just left still holds the
+  // exclusive lock, and WebKit releases it asynchronously.
+  const restore = fastLockRetries();
+  try {
+    const dir = path.join(TMP, 'lock-retry');
+    await fsp.mkdir(dir, { recursive: true });
+    const { parts, expected } = writeChunks(dir, 2, 512);
+    const server = await serveDir(dir);
+    const sink = new LockySink({ name: 'l.bin', lockFailures: 2 });
+    const set = await run({
+      sink,
+      ensure: {
+        parts: parts.map((p) => ({ url: server.url + p.url, bytes: p.bytes })),
+        expectedSize: expected.length,
+        cacheKey: 'l.bin',
+        buildId: 'b',
+      },
+    });
+    eq(sink.openAttempts, 3, 'the open was retried until the lock was released');
+    eq(set.size, expected.length, 'and the archive still assembled');
+    ok(sink.buffer.equals(expected), 'byte for byte');
+    ok(logs.some((line) => /still locked/.test(line)), 'the wait was logged: ' + logs.join(' | '));
+    server.stop();
+  } finally {
+    restore();
+  }
+});
+
+await test('a Chromium-style lock refusal is retried the same way', async () => {
+  const restore = fastLockRetries();
+  try {
+    const dir = path.join(TMP, 'lock-chromium');
+    await fsp.mkdir(dir, { recursive: true });
+    const { parts, expected } = writeChunks(dir, 1, 512);
+    const server = await serveDir(dir);
+    const sink = new LockySink({
+      name: 'c.bin',
+      lockFailures: 1,
+      lockName: 'NoModificationAllowedError',
+      lockMessage:
+        "Failed to execute 'createSyncAccessHandle' on 'FileSystemFileHandle': Access Handles cannot be " +
+        'created if there is another open Access Handle or Writable stream associated with the same file.',
+    });
+    await run({
+      sink,
+      ensure: {
+        parts: parts.map((p) => ({ url: server.url + p.url, bytes: p.bytes })),
+        expectedSize: expected.length,
+        cacheKey: 'c.bin',
+        buildId: 'b',
+      },
+    });
+    eq(sink.openAttempts, 2, 'the other engine\'s spelling of "locked" is retried too');
+    ok(sink.buffer.equals(expected), 'and the bytes are right');
+    server.stop();
+  } finally {
+    restore();
+  }
+});
+
+await test('a lock that never releases explains itself instead of blaming the cache', async () => {
+  const restore = fastLockRetries(3);
+  try {
+    const sink = new LockySink({ name: 'x.bin', lockFailures: Infinity });
+    const message = await rejects(
+      run({
+        sink,
+        ensure: {
+          parts: [{ url: 'http://127.0.0.1:1/never-fetched', bytes: 10 }],
+          expectedSize: 10,
+          cacheKey: 'x.bin',
+          buildId: 'b',
+          allowMemoryFallback: false, // what the community build asks for
+        },
+      }),
+      /locked by another Safari tab/,
+      'opening a cache file that stays locked'
+    );
+    eq(sink.openAttempts, 3, 'it kept trying for the whole backoff');
+    ok(/InvalidStateError/.test(message), 'the message names the DOMException: ' + message);
+    ok(/Clear cached game data/.test(message), 'and offers the way out: ' + message);
+    ok(!/prepare-build/.test(message), 'without telling the player to rebuild anything');
+    ok(sink.aborts >= 1, 'the sink was released before the error was thrown');
+  } finally {
+    restore();
+  }
+});
+
+await test('a failed download releases the cache file instead of leaving it locked', async () => {
+  // The leak behind the bug: a failure used to rethrow with the exclusive lock
+  // still held, so the *next* attempt could not open the file at all.
+  const dir = path.join(TMP, 'release');
+  await fsp.mkdir(dir, { recursive: true });
+  const { parts } = writeChunks(dir, 1, 512);
+  const server = await serveDir(dir);
+  const sink = new LockySink({ name: 'rel.bin' });
+  await rejects(
+    run({
+      sink,
+      ensure: {
+        parts: [{ url: server.url + parts[0].url, bytes: 256 }], // the file really is 512
+        expectedSize: 256,
+        cacheKey: 'rel.bin',
+        buildId: 'b',
+        allowMemoryFallback: false,
+      },
+    }),
+    /manifest/,
+    'loading a part that overruns the manifest'
+  );
+  eq(sink.aborts, 1, 'the exclusive lock was released on the way out');
+  server.stop();
+});
+
+await test('cancelling a download releases the cache file too', async () => {
+  const dir = path.join(TMP, 'cancel');
+  await fsp.mkdir(dir, { recursive: true });
+  const { parts } = writeChunks(dir, 3, 512);
+  const server = await serveDir(dir);
+  const controller = new AbortController();
+  const realFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async (url, opts) => {
+    calls++;
+    if (calls === 2) controller.abort(); // the page's stall watchdog does exactly this
+    return realFetch(url, opts);
+  };
+  const sink = new LockySink({ name: 'canc.bin' });
+  await rejects(
+    run({
+      sink,
+      ensure: {
+        parts: parts.map((p) => ({ url: server.url + p.url, bytes: p.bytes })),
+        expectedSize: 1536,
+        cacheKey: 'canc.bin',
+        buildId: 'b',
+        signal: controller.signal,
+        allowMemoryFallback: false,
+      },
+    }),
+    /aborted/i,
+    'cancelling mid-download'
+  );
+  globalThis.fetch = realFetch;
+  eq(sink.aborts, 1, 'a cancelled download does not leave the file locked');
   server.stop();
 });
 

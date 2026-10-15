@@ -60,8 +60,14 @@ async function openFile(dirName, fileName, expected, resume) {
   fileHandle = await dir.getFileHandle(fileName, { create: true });
   currentDir = dirName;
 
-  // createSyncAccessHandle() throws (NoModificationAllowed) if the file is
-  // already open elsewhere, and is not implemented outside workers.
+  // createSyncAccessHandle() takes an EXCLUSIVE lock on the file, so it is
+  // refused while anything else holds one — and the two engines disagree about
+  // how to say it: Chromium throws NoModificationAllowedError, WebKit throws
+  // InvalidStateError ("The object is in an invalid state."). Browsers also
+  // release the lock asynchronously after the holder dies, so a reload can land
+  // inside that window; stream.js retries the open for a few seconds rather
+  // than treating either refusal as a broken cache. It is not implemented
+  // outside workers.
   syncHandle = await fileHandle.createSyncAccessHandle();
 
   var size = 0;

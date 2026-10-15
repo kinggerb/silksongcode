@@ -213,6 +213,34 @@ overruns the manifest, a short one still fails with `ended early`. Do not
 "fix" a size mismatch by re-running `prepare-build.mjs` unless the server really
 is serving a different file than the one that was chunked.
 
+A third one, in the cache file itself: a `FileSystemSyncAccessHandle` (and a
+`createWritable()` stream) takes an **exclusive lock** on its file — while one
+is open, the next open of the same file is refused. Browsers release that lock
+*asynchronously* when the holder goes away, so there is a window where the file
+is still locked although nothing is using it any more, and three perfectly
+ordinary situations land inside it: this page's own *Try again* does a
+`location.reload()` and the new page asks for the file while WebKit is still
+letting go of the previous page's worker; a tab iPadOS jetsam-killed
+mid-download never ran `close()`; and a second Safari tab on this site holds
+the lock for as long as it is open. The engines do not even spell the refusal
+the same way — WebKit throws `InvalidStateError` ("The object is in an invalid
+state."), Chromium throws `NoModificationAllowedError` — which is how one brief
+window showed up on an iPad as a permanent, mysterious `could not open the
+cache file: The object is in an invalid state.`
+
+Two defects turned that window into a dead end: `ensureDataset` only released
+the sink on the memory-fallback branch, so every other failure rethrew with
+the worker still holding the exclusive handle — one failed download made the
+*next* open fail too — and `sink.open()` was attempted exactly once, so even
+the normal release window after a reload was fatal. `js/stream.js` now retries
+the open for a few seconds (recognising both engines' spellings), always
+releases the sink before rethrowing (`WorkerSink.abort()` sends `quit`, which
+flushes and `close()`es the handle instead of leaving `terminate()` to reap
+it), and a permanently locked file now tells the player to close the other
+tabs or clear the cache rather than anything about the cache being broken.
+`test-stream.mjs` pins all of it — do not "simplify" any of this back to a
+single open attempt.
+
 ## 10. What is still a limit of the port
 
 Unity still holds the data archive plus its own WebAssembly heap inside one tab.
