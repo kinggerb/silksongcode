@@ -270,7 +270,7 @@ await test('the pinned community source enables Start and warns about its first-
   const win = bootPage({ fetchImpl });
   await new Promise((resolve) => setTimeout(resolve, 0));
   eq(win.document.getElementById('startBtn').disabled, false, 'community build can start');
-  ok(/1986\.6 MB/.test(win.document.getElementById('sub').textContent), 'first-run archive size is shown');
+  ok(/1194\.1 MB/.test(win.document.getElementById('sub').textContent), 'first-run archive size is shown');
   eq(win.SKPerf.internals().buildSource(), 'community', 'the community adapter is selected');
   ok(/cdn\.jsdelivr\.net/.test(win.SKPerf.internals().assetBase()), 'the build source uses the pinned CDN base');
   win.close();
