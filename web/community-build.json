@@ -13,7 +13,7 @@
   },
   "assetArchive": {
     "cacheKey": "webgl-assets-bcbe014.zip",
-    "base": "https://cdn.jsdelivr.net/gh/kinggerb/silksongcode@27e01644b547d353d997ea6b15f0e2d56ef8eb4b/parts/",
+    "base": "https://raw.githubusercontent.com/kinggerb/silksongcode/27e01644b547d353d997ea6b15f0e2d56ef8eb4b/parts/",
     "slim": true,
     "total": 1252071320,
     "mime": "application/zip",
@@ -319,7 +319,7 @@
         "bytes": 10557336
       }
     ],
-    "mirror": "https://raw.githubusercontent.com/kinggerb/silksongcode/slim-assets/parts/"
+    "mirror": "https://cdn.jsdelivr.net/gh/kinggerb/silksongcode@27e01644b547d353d997ea6b15f0e2d56ef8eb4b/parts/"
   },
   "fileBytes": {
     "loader": 118453,

@@ -40,6 +40,10 @@
     if (archive.base !== undefined && (typeof archive.base !== 'string' || !archive.base)) {
       throw fail('community build configuration has an invalid asset archive base');
     }
+    // …and a second host to ask when the first one refuses a part.
+    if (archive.mirror !== undefined && (typeof archive.mirror !== 'string' || !archive.mirror)) {
+      throw fail('community build configuration has an invalid asset archive mirror');
+    }
 
     var total = 0;
     var names = Object.create(null);
@@ -71,6 +75,123 @@
    */
   function archiveBase(config, base) {
     return base || (config.assetArchive && config.assetArchive.base) || config.base;
+  }
+
+  /* ---------------------------------------------------------------- *
+   * A second host for the archive
+   *
+   * The parts are published from this repository, and two hosts serve
+   * them — but they do not serve them equally. jsDelivr refuses a
+   * GitHub package larger than its limit (150 MB, and this one is
+   * ~1.19 GB) with `403 Package size exceeded the configured limit`,
+   * while raw.githubusercontent.com serves every committed blob under
+   * 100 MB and each part is 16 MiB.
+   *
+   * The refusal is per request, not per package: a part jsDelivr has
+   * already cached keeps serving, so a download gets some way in and
+   * then dies on the first part that was not — `HTTP 403 for
+   * …/parts/WebGL.zip.part6`, six parts into seventy-five. That is
+   * also why the descriptor names raw as `base` and keeps jsDelivr as
+   * the `mirror`: the host that always answers leads, and the CDN that
+   * is faster when it does answer is the fallback.
+   *
+   * So the fetch the downloader uses is wrapped: a part that is
+   * refused — or a host that cannot be reached at all — is asked for
+   * once more from the other host, at the same path.
+   * ---------------------------------------------------------------- */
+
+  /**
+   * Statuses worth asking the other host about. A refusal (403), a part
+   * that is not where the descriptor says it is (404), a server that gave
+   * up (408), one that asked us to slow down (429) and anything on the
+   * server's own side (5xx) are all about the *host*, not about the bytes.
+   * A 4xx that is not in this list is about the request itself, and the
+   * mirror would answer it the same way.
+   */
+  function retryableStatus(status) {
+    return status === 403 || status === 404 || status === 408 || status === 429 || status >= 500;
+  }
+
+  /** Is `url` inside `root`? Compared as plain strings, after the root's trailing slashes. */
+  function underRoot(url, root) {
+    if (!root || !url) return false;
+    var prefix = String(root).replace(/\/+$/, '');
+    var target = String(url);
+    return target === prefix || target.indexOf(prefix + '/') === 0;
+  }
+
+  /**
+   * The same part on the mirror, or null when this URL must not be
+   * mirrored: it is not one of the archive's own (a Unity build file on
+   * another host has no business being asked for here), or it is already
+   * on the mirror — asking the host that just refused it again would be
+   * pointless, and could loop.
+   */
+  function mirrorUrlFor(url, base, mirror) {
+    if (!mirror || !underRoot(url, base)) return null;
+    if (underRoot(url, mirror)) return null;
+    var root = String(base).replace(/\/+$/, '');
+    return join(mirror, String(url).slice(root.length).replace(/^\/+/, ''));
+  }
+
+  /**
+   * Wrap a fetch so a part the archive's own host refuses is retried once
+   * against the mirror. The retry is exactly one: if the mirror refuses it
+   * too, that answer is what the caller gets, so a download cannot ping-pong
+   * between two hosts that are both saying no.
+   *
+   * Anything that is not a URL under `base` passes straight through, so the
+   * wrapper is safe to hand to a downloader that also fetches other files.
+   */
+  function mirrorFetch(fetchImpl, options) {
+    options = options || {};
+    var base = options.base;
+    var mirror = options.mirror;
+    var onLog = typeof options.onLog === 'function' ? options.onLog : function () {};
+    var inner = typeof fetchImpl === 'function' ? fetchImpl : function (input, init) { return fetch(input, init); };
+
+    function urlOf(input) {
+      if (typeof input === 'string') return input;
+      if (typeof URL !== 'undefined' && input instanceof URL) return String(input);
+      if (input && typeof input.url === 'string') return input.url;
+      return '';
+    }
+
+    return async function mirroredFetch(input, init) {
+      var url = urlOf(input);
+      var fallback = mirrorUrlFor(url, base, mirror);
+      // Without a mirror there is nothing to fall back to: behave exactly
+      // like the fetch that was handed in.
+      if (!fallback) return inner(input, init);
+
+      try {
+        var response = await inner(input, init);
+        if (!response || response.ok || !retryableStatus(response.status)) return response;
+        onLog('HTTP ' + response.status + ' for ' + url + ' — asking the mirror');
+      } catch (error) {
+        // A host that cannot be reached at all (DNS, TLS, a reset
+        // connection) throws instead of answering. The mirror is the only
+        // second opinion there is — but an abort is the caller's own doing,
+        // and is rethrown rather than retried somewhere else.
+        if (init && init.signal && init.signal.aborted) throw error;
+        onLog('could not reach ' + url + ' (' + ((error && error.message) || error) + ') — asking the mirror');
+      }
+      return inner(fallback, init);
+    };
+  }
+
+  /**
+   * The fetch the archive should be downloaded with: the caller's own,
+   * wrapped so a refused or unreachable part is asked for again from the
+   * mirror named in the descriptor.
+   */
+  function archiveFetch(config, options, base) {
+    var archive = config.assetArchive || {};
+    return mirrorFetch(options.fetchImpl, {
+      base: base,
+      mirror: archive.mirror,
+      onLog: options.onLog,
+    });
   }
 
   function parts(config, base) {
@@ -243,6 +364,11 @@
     var base = archiveBase(config, options.base);
     var archive = config.assetArchive;
     var partList = parts(config, base);
+    // Every request for a part goes through this fetch — the plan's range
+    // requests as well as the download — so a host that refuses a part is
+    // asked for again from the mirror named in the descriptor, instead of
+    // failing a 1.19 GB download six parts in.
+    var fetchImpl = archiveFetch(config, options, base);
 
     // Work out whether the archive can be made smaller before a single
     // byte of it is downloaded. An archive that says it is already slim has
@@ -253,6 +379,7 @@
       try {
         plan = await planArchive(partList, Object.assign({}, options, {
           key: config.buildId + ':' + archive.total,
+          fetchImpl: fetchImpl,
         }));
       } catch (error) {
         if (options.onLog) {
@@ -287,7 +414,7 @@
         preferDisk: true,
         allowMemoryFallback: false,
         concurrency: options.concurrency || 6,
-        fetchImpl: options.fetchImpl,
+        fetchImpl: fetchImpl,
         onProgress: options.onProgress,
         onStatus: options.onStatus,
         onLog: options.onLog,
@@ -313,7 +440,7 @@
       allowMemoryFallback: false,
       // The archive is 75 parts: one at a time is minutes of round trips.
       concurrency: options.concurrency || 6,
-      fetchImpl: options.fetchImpl,
+      fetchImpl: fetchImpl,
       onProgress: options.onProgress,
       onStatus: options.onStatus,
       onLog: options.onLog,
@@ -801,6 +928,10 @@
     planArchive: planArchive,
     openArchive: openArchive,
     installFetchMount: installFetchMount,
+    // Exported for the test suite: the fetch `ensureArchive` downloads with,
+    // which asks the descriptor's mirror once when the archive's own host
+    // refuses a part (or cannot be reached at all).
+    mirrorFetch: mirrorFetch,
     // Exported for the test suite and for anything that wants to build the
     // same placeholder container the build pipeline writes.
     makePlaceholderVideo: function (kind) {
