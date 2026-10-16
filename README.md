@@ -62,6 +62,9 @@ Unity 入口文件从构建源 CDN 加载，约 1.94 GiB 的 Addressables 分片
 具体来源、版本和限制见 `web/COMMUNITY-BUILD.md`。如果有本地或自托管的标准 Unity WebGL 构建，
 `web/play.html` 会优先使用它；准备与校验方法见 `web/BUILD.md`，实机使用与画质档位见 `web/IPAD.md`.
 
+首次下载途中可能被 GitHub 限流（未登录的 raw 下载按小时计数，而分片有 75 个），页面会
+自动等待并继续，已下载的分片不会丢；详见 `web/COMMUNITY-BUILD.md`。
+
 GitHub Pages 的仓库根地址 `https://kinggerb.github.io/silksongcode/` 由根目录的
 `index.html` 转到 `web/play.html`（保留查询参数和 hash），`.nojekyll` 则让 Pages 原样提供文件。
 若关闭社区构建回退（`?community=0`）且没有标准构建，页面会明确显示 **Game build not found** 并禁用 Start；

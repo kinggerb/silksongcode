@@ -1029,5 +1029,101 @@ await test('a sink that can only be written in order keeps the old behaviour', a
   server.stop();
 });
 
+section('a caller-owned backoff');
+
+await test('an HTTP failure carries the status and the url it came from', async () => {
+  // The downloader decides what to do with a failure by its own rules; a
+  // caller that knows its host (community-build.js and GitHub's rate limit)
+  // needs the status, not just the words.
+  const dir = path.join(TMP, 'status');
+  await fsp.mkdir(dir, { recursive: true });
+  const { parts, expected } = writeChunks(dir, 2, 128);
+  const server = await serveDir(dir);
+  const sink = new FakeOpfsSink({ name: 'st.bin' });
+  let caught = null;
+  try {
+    await run({
+      sink,
+      ensure: {
+        parts: parts.map((p) => ({ url: server.url + p.url, bytes: p.bytes })),
+        expectedSize: expected.length,
+        cacheKey: 'st.bin',
+        buildId: 'b',
+        retryAttempts: 0,
+        fetchImpl: async () => new Response('nope', { status: 503 }),
+      },
+    });
+  } catch (err) {
+    caught = err;
+  }
+  eq(caught && caught.status, 503, 'the status rides along with the error');
+  ok(/chunk[12]\.bin$/.test(String(caught && caught.url)), 'and so does the url that produced it: ' + (caught && caught.url));
+  server.stop();
+});
+
+await test('a caller-owned backoff decides how long a part waits, and how often', async () => {
+  // Six failures: the built-in budget is four retries, so only a caller that
+  // says otherwise gets the whole file.
+  const dir = path.join(TMP, 'backoff');
+  await fsp.mkdir(dir, { recursive: true });
+  const { parts, expected } = writeChunks(dir, 1, 128);
+  const server = await serveDir(dir);
+  let failures = 0;
+  const sink = new FakeOpfsSink({ name: 'bo.bin' });
+  const set = await run({
+    sink,
+    ensure: {
+      parts: parts.map((p) => ({ url: server.url + p.url, bytes: p.bytes })),
+      expectedSize: expected.length,
+      cacheKey: 'bo.bin',
+      buildId: 'b',
+      retryAfter: () => 0,
+      fetchImpl: async (url, init) => {
+        if (failures < 6) {
+          failures++;
+          throw new Error('connection reset');
+        }
+        return fetch(url, init);
+      },
+    },
+  });
+  eq(failures, 6, 'every failure was retried, past the built-in budget');
+  eq(set.size, expected.length, 'and the file still assembled');
+  server.stop();
+});
+
+await test('a caller-owned backoff can give up at once', async () => {
+  // What community-build.js does with a rate limit its own fetch has already
+  // waited out: the host is short of requests, so spending four more of them
+  // to be told the same thing is the wrong move.
+  const dir = path.join(TMP, 'giveup');
+  await fsp.mkdir(dir, { recursive: true });
+  const { parts, expected } = writeChunks(dir, 1, 128);
+  const server = await serveDir(dir);
+  let attempts = 0;
+  const sink = new FakeOpfsSink({ name: 'gu.bin' });
+  const message = await rejects(
+    run({
+      sink,
+      ensure: {
+        parts: parts.map((p) => ({ url: server.url + p.url, bytes: p.bytes })),
+        expectedSize: expected.length,
+        cacheKey: 'gu.bin',
+        buildId: 'b',
+        retryAfter: () => -1,
+        fetchImpl: async () => {
+          attempts++;
+          return new Response('refused', { status: 403 });
+        },
+      },
+    }),
+    /HTTP 403/,
+    'a rate-limited part'
+  );
+  eq(attempts, 1, 'the part was asked for once and not retried');
+  ok(/HTTP 403/.test(message), 'the caller still sees what happened');
+  server.stop();
+});
+
 await fsp.rm(TMP, { recursive: true, force: true });
 await done('stream tests');

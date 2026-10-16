@@ -1,5 +1,5 @@
 /* Tests for the external community-build descriptor and lazy ZIP mount. */
-import { section, test, eq, ok, done } from './testkit.mjs';
+import { section, test, eq, ok, rejects, done } from './testkit.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -9,6 +9,7 @@ import { makePlaceholderVideo } from './unity-webdata.mjs';
 const WEB = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const require = createRequire(import.meta.url);
 const community = require('../js/community-build.js');
+const stream = require('../js/stream.js');
 const zip = require('../js/zip.min.js');
 const source = JSON.parse(fs.readFileSync(path.join(WEB, 'community-build.json'), 'utf8'));
 
@@ -37,6 +38,40 @@ function stubFetch(verdicts) {
 }
 
 const urlsOf = (stub) => stub.requests.map((r) => r.url);
+
+/**
+ * A sink that keeps the download in memory but behaves like the disk one the
+ * page uses: positional writes, resume, markers (see web/js/stream.js). The
+ * end-to-end tests below drive the real streamer with it.
+ */
+function fakeDiskSink() {
+  const files = new Map();
+  let buffer = null;
+  let size = 0;
+  return {
+    sequentialOnly: false,
+    stat: (name) => (files.has(name) ? String(files.get(name)).length : -1),
+    getText: (name) => (files.has(name) ? String(files.get(name)) : null),
+    putText: (name, text) => files.set(name, text),
+    remove: (name) => files.delete(name),
+    open: () => Promise.resolve({ size: size, canResume: size > 0 }),
+    write: (u8, at) => {
+      if (!buffer || buffer.length < at + u8.byteLength) {
+        const bigger = new Uint8Array(at + u8.byteLength);
+        if (buffer) bigger.set(buffer);
+        buffer = bigger;
+      }
+      buffer.set(u8, at);
+      size = Math.max(size, at + u8.byteLength);
+      return Promise.resolve();
+    },
+    finish: () => Promise.resolve({ size: size }),
+    getFile: () => new Blob([buffer ? buffer.subarray(0, size) : new Uint8Array(0)]),
+    abort: () => Promise.resolve(),
+    destroy: () => {},
+    bytes: () => (buffer ? buffer.subarray(0, size) : new Uint8Array(0)),
+  };
+}
 const hostCount = (stub, host) => stub.requests.filter((r) => new URL(r.url).host === host).length;
 
 section('source descriptor');
@@ -242,6 +277,378 @@ await test('the archive plan reads its index through the same mirrored fetch', a
   const res = await readerFetch(RAW_BASE + 'WebGL.zip.part75', { headers: { Range: 'bytes=0-15' } });
   eq(res.status, 200, 'a refused range request is answered from the mirror');
   eq(stub.requests[1].init.headers.Range, 'bytes=0-15', 'with the very same byte range');
+});
+
+section('waiting out a rate limit');
+
+/**
+ * A clock that only moves when the test says so. `sleep` can also be made to
+ * block until the test releases it, which is how a pause is held open long
+ * enough for a second part to walk into it.
+ */
+function fakeClock() {
+  const state = { now: 0, waits: [] };
+  let release = null;
+  let holding = null;
+  return {
+    now: () => state.now,
+    waits: state.waits,
+    sleep: async (ms) => {
+      // Two parts waiting out the same pause share the clock: whichever of
+      // them finishes last cannot push time past the end of that pause.
+      const started = state.now;
+      state.waits.push(ms);
+      if (holding) await holding;
+      state.now = Math.max(state.now, started + ms);
+    },
+    advance: (ms) => {
+      state.now += ms;
+    },
+    hold: () => {
+      holding = new Promise((resolve) => { release = resolve; });
+    },
+    release: () => {
+      if (release) release();
+      holding = null;
+    },
+  };
+}
+
+/**
+ * A fetch that answers each host from a script — one verdict per request, the
+ * last one repeated — and records when (on the fake clock) it was asked.
+ */
+function scriptedFetch(script, seen, clock) {
+  const taken = Object.create(null);
+  return async (url) => {
+    const target = String(url);
+    const host = new URL(target).host;
+    const at = taken[host] || 0;
+    taken[host] = at + 1;
+    if (seen) seen.push({ url: target, host, at: clock ? clock.now() : at });
+    const list = script[host] || ['ok'];
+    const verdict = list[Math.min(at, list.length - 1)];
+    if (verdict === 'unreachable') throw new TypeError('Failed to fetch');
+    if (verdict === 'ok') return new Response('part bytes', { status: 200 });
+    // `{ status, headers }` — a refusal that also says how long it wants.
+    if (verdict && typeof verdict === 'object') {
+      return new Response('refused', { status: verdict.status || 403, headers: verdict.headers });
+    }
+    return new Response('refused', { status: verdict });
+  };
+}
+
+await test('a 403 from GitHub raw is waited out instead of ending the download', async () => {
+  // The failure that stopped a download a third of the way in: raw answers
+  // 403 because the page has had its share of files for the hour, and the
+  // page used to give up a few seconds later.
+  const clock = fakeClock();
+  const seen = [];
+  const impl = scriptedFetch({ 'raw.githubusercontent.com': [403, 'ok'], 'cdn.jsdelivr.net': [403] }, seen, clock);
+  const limit = community.rateLimiter({ now: clock.now, sleep: clock.sleep });
+  const mirrored = community.mirrorFetch(impl, { base: RAW_BASE, mirror: MIRROR_BASE, rateLimit: limit });
+
+  const res = await mirrored(RAW_BASE + 'WebGL.zip.part28');
+  eq(res.status, 200, 'the part arrives as soon as GitHub lets us have it');
+  eq(clock.waits.length, 1, 'one pause, not a give-up');
+  eq(clock.waits[0], community.RATE_LIMIT_WAITS[0], 'and it starts with the shortest one');
+  eq(seen.length, 3, 'raw, then the mirror, then raw again — three requests');
+  eq(seen[2].host, 'raw.githubusercontent.com', 'the part itself was asked for again');
+  eq(seen[2].at, clock.waits[0], 'after the pause, not during it');
+});
+
+await test('a pause is shared: a second part waits for it instead of spending a request', async () => {
+  const clock = fakeClock();
+  clock.hold(); // the pause stays open until the test lets it go
+  const seen = [];
+  const impl = scriptedFetch({ 'raw.githubusercontent.com': [403, 'ok', 'ok'], 'cdn.jsdelivr.net': [403] }, seen, clock);
+  const limit = community.rateLimiter({ now: clock.now, sleep: clock.sleep });
+  const mirrored = community.mirrorFetch(impl, { base: RAW_BASE, mirror: MIRROR_BASE, rateLimit: limit });
+
+  const first = mirrored(RAW_BASE + 'WebGL.zip.part28');
+  // Wait for the first part to have been refused by both hosts and to be
+  // inside its pause.
+  while (clock.waits.length === 0) await new Promise((resolve) => setImmediate(resolve));
+  const second = mirrored(RAW_BASE + 'WebGL.zip.part29');
+  // …and let the second one get as far as it can.
+  while (clock.waits.length < 2) await new Promise((resolve) => setImmediate(resolve));
+  clock.release();
+  const answers = await Promise.all([first, second]);
+
+  eq(answers[0].status, 200, 'the refused part came back after the pause');
+  eq(answers[1].status, 200, 'and the one that walked into the pause got its bytes too');
+  eq(clock.waits.join(), '30000,30000', 'one pause, waited out by both parts');
+  const secondAsks = seen.filter((r) => r.url.endsWith('part29'));
+  eq(secondAsks.length, 1, 'the second part asked exactly once');
+  eq(secondAsks[0].at, 30000, 'after the pause was over — it did not spend a request on it');
+});
+
+await test('refusals that arrive together are one round, not one escalation each', async () => {
+  // Three parts refused in the same breath are one piece of news. Six parts
+  // are on the wire at once, so without this the shared pause would jump to
+  // the longest wait the moment the limit hit.
+  const clock = fakeClock();
+  clock.hold(); // keep the pause open until all three are inside it
+  const impl = scriptedFetch({ 'raw.githubusercontent.com': [403, 403, 403, 'ok'], 'cdn.jsdelivr.net': [403] });
+  const limit = community.rateLimiter({ now: clock.now, sleep: clock.sleep });
+  const mirrored = community.mirrorFetch(impl, { base: RAW_BASE, mirror: MIRROR_BASE, rateLimit: limit });
+
+  const running = [
+    mirrored(RAW_BASE + 'WebGL.zip.part28'),
+    mirrored(RAW_BASE + 'WebGL.zip.part29'),
+    mirrored(RAW_BASE + 'WebGL.zip.part30'),
+  ];
+  for (let i = 0; i < 200 && clock.waits.length < 3; i++) await new Promise((resolve) => setImmediate(resolve));
+  clock.release();
+  const answers = await Promise.all(running);
+
+  eq(answers.map((a) => a.status).join(), '200,200,200', 'all three came back after the pause');
+  eq(clock.waits.length, 3, 'one wait each');
+  eq(
+    clock.waits.join(),
+    [community.RATE_LIMIT_WAITS[0], community.RATE_LIMIT_WAITS[0], community.RATE_LIMIT_WAITS[0]].join(),
+    'and all three waited the same 30 s — not 30 s, then 1 min, then 2 min'
+  );
+  eq(limit.spentMs(), community.RATE_LIMIT_WAITS[0], 'the budget was charged once, not three times');
+});
+
+await test('the status line counts down instead of sitting on one sentence', async () => {
+  // A quarter of an hour of "please wait" reads as a hung tab, so the page is
+  // told how much of the pause is left, over and over.
+  const clock = fakeClock();
+  const statuses = [];
+  const impl = scriptedFetch({ 'raw.githubusercontent.com': [403, 'ok'], 'cdn.jsdelivr.net': [403] });
+  const limit = community.rateLimiter({ now: clock.now, sleep: clock.sleep });
+  const mirrored = community.mirrorFetch(impl, {
+    base: RAW_BASE,
+    mirror: MIRROR_BASE,
+    rateLimit: limit,
+    onStatus: (message) => statuses.push(message),
+  });
+
+  eq((await mirrored(RAW_BASE + 'WebGL.zip.part28')).status, 200, 'the part arrived after the pause');
+  ok(statuses.length >= 3, 'the page was told more than once: ' + statuses.length + ' updates');
+  ok(/pausing 30 s/.test(statuses[0]), 'first why: ' + statuses[0]);
+  ok(/to go/.test(statuses[1]), 'then how long is left: ' + statuses[1]);
+  ok(/Nothing is lost/.test(statuses.join(' ')), 'and every time that nothing is lost');
+});
+
+await test("jsDelivr's own 403 is not waited out: it is about the package, not the hour", async () => {
+  // `403 Package size exceeded the configured limit of 150 MB` will still be
+  // true in an hour, so there is nothing to wait for — and the mirror is not
+  // asked again for the rest of the download either.
+  const clock = fakeClock();
+  const seen = [];
+  const impl = scriptedFetch({ 'cdn.jsdelivr.net': [403], 'raw.githubusercontent.com': [403] }, seen, clock);
+  const limit = community.rateLimiter({ now: clock.now, sleep: clock.sleep });
+  // The mirror leads here (in the descriptor it is the other way round), so
+  // the refusal the policy has to judge is jsDelivr's.
+  const mirrored = community.mirrorFetch(impl, { base: MIRROR_BASE, mirror: RAW_BASE, rateLimit: limit });
+
+  const res = await mirrored(MIRROR_BASE + 'WebGL.zip.part28');
+  eq(res.status, 403, 'the refusal stands');
+  eq(clock.waits.length, 0, 'nothing was waited out');
+  eq(seen.length, 2, 'one request each, and then it stopped');
+});
+
+await test('the waiting stops when its budget is spent, and the log says why', async () => {
+  const clock = fakeClock();
+  const logs = [];
+  const impl = scriptedFetch({ 'raw.githubusercontent.com': [403], 'cdn.jsdelivr.net': [403] });
+  const limit = community.rateLimiter({
+    now: clock.now,
+    sleep: clock.sleep,
+    budgetMs: 45000,
+    waits: [30000, 60000],
+    onLog: (line) => logs.push(line),
+  });
+  const mirrored = community.mirrorFetch(impl, {
+    base: RAW_BASE,
+    mirror: MIRROR_BASE,
+    rateLimit: limit,
+    onLog: (line) => logs.push(line),
+  });
+
+  const res = await mirrored(RAW_BASE + 'WebGL.zip.part28');
+  eq(res.status, 403, 'the downloader is told what happened');
+  eq(clock.waits.join(), '30000', 'one pause of 30 s: the next one would overrun the budget');
+  ok(logs.some((line) => /giving up/.test(line)), 'and the log explains it: ' + logs.join(' | '));
+  ok(logs.some((line) => /rate-limiting/.test(line)), 'after telling the user what it is waiting for: ' + logs.join(' | '));
+});
+
+await test('a part that gets through starts the escalation over', async () => {
+  const clock = fakeClock();
+  const impl = scriptedFetch({ 'raw.githubusercontent.com': [403, 'ok', 403, 'ok'], 'cdn.jsdelivr.net': [403] });
+  const limit = community.rateLimiter({ now: clock.now, sleep: clock.sleep });
+  const mirrored = community.mirrorFetch(impl, { base: RAW_BASE, mirror: MIRROR_BASE, rateLimit: limit });
+
+  eq((await mirrored(RAW_BASE + 'WebGL.zip.part28')).status, 200, 'the first part needed one pause');
+  eq((await mirrored(RAW_BASE + 'WebGL.zip.part29')).status, 200, 'the second one too');
+  eq(clock.waits.join(), '30000,30000', 'the second pause is short again — the host was answering in between');
+});
+
+await test('a host that cannot be reached is not waited out: that is not a rate limit', async () => {
+  // DNS, TLS, a reset connection: there is no status to read and no hour to
+  // sit out. The mirror is still asked, and the downloader's own backoff
+  // still covers a blip — waiting on the page would only add minutes.
+  const clock = fakeClock();
+  const seen = [];
+  const impl = scriptedFetch({ 'raw.githubusercontent.com': ['unreachable'], 'cdn.jsdelivr.net': [403] }, seen, clock);
+  const limit = community.rateLimiter({ now: clock.now, sleep: clock.sleep });
+  const mirrored = community.mirrorFetch(impl, { base: RAW_BASE, mirror: MIRROR_BASE, rateLimit: limit });
+  const res = await mirrored(RAW_BASE + 'WebGL.zip.part28');
+  eq(res.status, 403, "the answer is the mirror's own");
+  eq(clock.waits.length, 0, 'nothing was waited out');
+  eq(seen.length, 2, 'the host was tried once and the mirror once');
+  eq(
+    community.archiveRetryAfter()(new Error('Failed to fetch')),
+    null,
+    'and the downloader keeps its own backoff for an unreachable host'
+  );
+});
+
+await test("GitHub's own `retry-after` is what the page waits for", async () => {
+  // When raw exposes the header — it usually does not, cross-origin — there is
+  // nothing to guess: the host knows when its own window opens again.
+  const clock = fakeClock();
+  const impl = scriptedFetch({
+    'raw.githubusercontent.com': [{ status: 403, headers: { 'retry-after': '45' } }, 'ok'],
+    'cdn.jsdelivr.net': [403],
+  });
+  const limit = community.rateLimiter({ now: clock.now, sleep: clock.sleep });
+  const mirrored = community.mirrorFetch(impl, { base: RAW_BASE, mirror: MIRROR_BASE, rateLimit: limit });
+  eq((await mirrored(RAW_BASE + 'WebGL.zip.part28')).status, 200, 'the part came back when GitHub said it would');
+  eq(clock.waits.join(), '45000', 'it waited the 45 s it was told to, not the 30 s it would have guessed');
+});
+
+await test('`x-ratelimit-reset` is read the same way', async () => {
+  const clock = fakeClock();
+  const impl = scriptedFetch({
+    'raw.githubusercontent.com': [{ status: 403, headers: { 'x-ratelimit-reset': '120' } }, 'ok'],
+    'cdn.jsdelivr.net': [403],
+  });
+  const limit = community.rateLimiter({ now: clock.now, sleep: clock.sleep });
+  const mirrored = community.mirrorFetch(impl, { base: RAW_BASE, mirror: MIRROR_BASE, rateLimit: limit });
+  eq((await mirrored(RAW_BASE + 'WebGL.zip.part28')).status, 200, 'the part came back');
+  eq(clock.waits.join(), '120000', 'two minutes: the reset time minus the clock');
+});
+
+await test('a hint that has gone by costs seconds, not another round of guessing', async () => {
+  // Six parts are refused together with `retry-after: 3600`. The first one
+  // waits the hour; by the time the others act on their own copy of that
+  // answer, the hour has gone by.
+  const clock = fakeClock();
+  const limit = community.rateLimiter({ now: clock.now, sleep: clock.sleep });
+  const deadline = clock.now() + 3600000;
+  eq(limit.pause(deadline), 3600000, 'a deadline in the future is what is left of it');
+  clock.advance(3600000);
+  eq(limit.pause(deadline), 5000, 'and one that has passed costs the floor — not another 15 min');
+});
+
+await test('the downloader does not spend its own retries on a rate limit', () => {
+  const after = community.archiveRetryAfter();
+  const limited = { status: 403, url: RAW_BASE + 'WebGL.zip.part28' };
+  eq(after(limited), -1, 'a rate limit is not retried by the downloader — the fetch waited it out');
+  eq(after({ status: 429, url: RAW_BASE + 'WebGL.zip.part28' }), -1, 'a 429 is the same thing said plainly');
+  eq(after({ status: 500, url: RAW_BASE + 'WebGL.zip.part28' }), null, 'an ordinary failure keeps the built-in backoff');
+  eq(after({ status: 403, url: MIRROR_BASE + 'WebGL.zip.part28' }), null, "and so does a refusal that is not GitHub's");
+  eq(after(new Error('connection reset')), null, 'and so does a host that could not be reached at all');
+});
+
+await test('the downloader is handed that backoff, but only when waiting is possible', async () => {
+  let seen;
+  const fakeStream = { ensureDataset: async (options) => { seen = options; return { file: new Blob(['fake']) }; } };
+  const okFetch = () => new Response('part bytes', { status: 200 });
+
+  await community.ensureArchive(source, { stream: fakeStream, fetchImpl: okFetch });
+  eq(typeof seen.retryAfter, 'function', 'the streamer was handed a backoff');
+  eq(seen.retryAfter({ status: 403, url: RAW_BASE + 'WebGL.zip.part28' }), -1, 'that gives up on a rate limit');
+
+  await community.ensureArchive(source, { stream: fakeStream, fetchImpl: okFetch, rateLimit: false });
+  eq(seen.retryAfter, null, 'with the waiting turned off the streamer keeps its own backoff');
+});
+
+await test('a download that is rate limited a third of the way in finishes instead of dying', async () => {
+  // The failure as it was reported: `HTTP 403 for …/parts/WebGL.zip.part28`,
+  // a third of the way through seventy-five parts. Scaled down — six parts,
+  // GitHub refusing from the fourth, the real streamer and the real fetch
+  // wrapper — and run on a clock the test controls.
+  const clock = fakeClock();
+  const logs = [];
+  const asked = { 'raw.githubusercontent.com': 0, 'cdn.jsdelivr.net': 0 };
+  const small = JSON.parse(JSON.stringify(source));
+  const PART = 1024;
+  small.assetArchive.parts = [1, 2, 3, 4, 5, 6].map((n) => ({ path: 'WebGL.zip.part' + n, bytes: PART }));
+  small.assetArchive.total = 6 * PART;
+  small.assetArchive.slim = true; // nothing to plan, straight to the download
+
+  const impl = async (url) => {
+    const target = String(url);
+    const host = new URL(target).host;
+    const part = Number(target.match(/part(\d+)$/)[1]);
+    asked[host]++;
+    // GitHub answers the first three parts and then has had enough — for two
+    // pauses' worth of asking, which is all the patience it takes here.
+    if (host === 'raw.githubusercontent.com' && part > 3 && clock.waits.length < 2) {
+      return new Response('refused', { status: 403 });
+    }
+    if (host === 'cdn.jsdelivr.net') return new Response('refused', { status: 403 });
+    return new Response(new Uint8Array(PART).fill(part), { status: 200 });
+  };
+
+  const sink = fakeDiskSink();
+  const set = await community.ensureArchive(small, {
+    stream: stream,
+    writerFactory: async () => sink,
+    fetchImpl: impl,
+    now: clock.now,
+    sleep: clock.sleep,
+    onLog: (line) => logs.push(line),
+  });
+
+  eq(set.size, 6 * PART, 'all six parts are on "disk"');
+  const bytes = sink.bytes();
+  let assembled = true;
+  for (let n = 1; n <= 6; n++) {
+    for (let i = 0; i < PART; i++) {
+      if (bytes[(n - 1) * PART + i] !== n) assembled = false;
+    }
+  }
+  ok(assembled, 'and every part landed at its own offset');
+  ok(clock.waits.length >= 1, 'the refusal was waited out (' + clock.waits.join() + ' ms of pauses)');
+  ok(asked['raw.githubusercontent.com'] > 6, 'the refused parts were asked for again (' + asked['raw.githubusercontent.com'] + ' requests)');
+  ok(logs.some((line) => /rate-limiting/.test(line)), 'the user was told what the page is waiting for');
+});
+
+await test('the same refusal ends the download when the waiting is switched off', async () => {
+  // What it did before, and what ?archiveWait=0-ish callers still get: four
+  // quick retries that a rate limit does not care about, and then a dead
+  // download a third of the way in.
+  const logs = [];
+  const small = JSON.parse(JSON.stringify(source));
+  const PART = 512;
+  small.assetArchive.parts = [1, 2, 3, 4].map((n) => ({ path: 'WebGL.zip.part' + n, bytes: PART }));
+  small.assetArchive.total = 4 * PART;
+  small.assetArchive.slim = true;
+  const impl = async (url) => {
+    const host = new URL(String(url)).host;
+    if (host === 'cdn.jsdelivr.net') return new Response('refused', { status: 403 });
+    return new Response('refused', { status: 403 });
+  };
+  const message = await rejects(
+    community.ensureArchive(small, {
+      stream: stream,
+      writerFactory: async () => fakeDiskSink(),
+      fetchImpl: impl,
+      rateLimit: false,
+      retryAttempts: 0,
+      onLog: (line) => logs.push(line),
+    }),
+    /HTTP 403/,
+    'a rate-limited download'
+  );
+  ok(/raw\.githubusercontent\.com/.test(message), 'and it names the host that refused it: ' + message);
+  ok(!logs.some((line) => /rate-limiting/.test(line)), 'nothing was waited out');
 });
 
 section('ZIP-backed Addressables');

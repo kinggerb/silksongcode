@@ -135,6 +135,11 @@ build with a bad chunk, and `?verify=full` hashes the whole data file instead of
 sampling its first and last 4 MB. The community mode validates its pinned
 source descriptor and split ZIP sizes instead.
 
+The community archive download takes two more: `?archiveBase=<url>` serves the
+parts from a host of your own, and `?archiveWait=<minutes>` sets how long the
+page may wait out GitHub's rate limit (90 by default; `?archiveWait=0` is not
+allowed — the page always waits at least a little).
+
 The page also caps the frame rate by wrapping `requestAnimationFrame` — on a
 120 Hz iPad an uncapped game draws twice the frames for no visible gain — and
 auto-degrades one level if the frame rate stays under 80 % of the cap for three
@@ -206,7 +211,8 @@ page can export, import and *install* them:
 | The tab vanishes with no message at all | That is jetsam, and it happens too fast for the page to draw. *Menu ▸ Stability* shows the heap the last session died at. |
 | Black screen after the bar | Check the log panel: `saved file is N bytes, expected M` means the download was cut; reload and it resumes. `the data check` lines say if a chunk is wrong. |
 | `There is not enough free storage` | Free space in *Settings ▸ General ▸ iPad Storage*; the community ZIP alone needs about 1194.1 MB, plus headroom for extracted bundles and Unity. |
-| Loading stops with `HTTP 403 for https://cdn.jsdelivr.net/…/parts/WebGL.zip.partN` | jsDelivr refusing a GitHub *package* over its 150 MB limit — the archive is ~1.19 GB. It refuses only the parts it has not already cached, which is why the download gets a few parts in first. The descriptor serves the parts from `raw.githubusercontent.com` now and keeps jsDelivr only as a mirror, and a refused part is retried once against that mirror; reload and the download resumes where it stopped. See [COMMUNITY-BUILD.md](COMMUNITY-BUILD.md#two-hosts-for-the-archive-parts). |
+| Loading stops with `HTTP 403 for https://cdn.jsdelivr.net/…/parts/WebGL.zip.partN` | jsDelivr refusing a GitHub *package* over its 150 MB limit — the archive is ~1.19 GB. It refuses only the parts it has not already cached, which is why the download gets a few parts in first. The descriptor serves the parts from `raw.githubusercontent.com` and keeps jsDelivr as a mirror, and a refused part is retried once against that mirror; reload and the download resumes where it stopped. See [COMMUNITY-BUILD.md](COMMUNITY-BUILD.md#two-hosts-for-the-archive-parts). |
+| Loading pauses with `GitHub is rate-limiting the download (HTTP 403) — pausing N min` | GitHub only lets a page that is not signed in download so many files an hour, and the archive is 75 of them. Nothing is lost: the page waits it out (30 s, 1 min, 2 min, 5 min, then 15 min, up to 90 minutes — `?archiveWait=<minutes>`) and carries on by itself. Keep the tab in the foreground; a reload resumes from the parts already saved. See [COMMUNITY-BUILD.md](COMMUNITY-BUILD.md#a-403-in-the-middle-of-the-download). |
 | `null is not an object (evaluating 'document.querySelector('base').href')` right after the archive finishes | The community loader asks the page for a `<base>` element (see [COMMUNITY-BUILD.md](COMMUNITY-BUILD.md#what-the-upstream-loader-expects-from-the-page)); `play.html` now provides one. Reload — the archive is cached (`cache hit:` in the log), so it goes straight to Unity, and the log shows `community loader <base>: …`. |
 | No sound | Tap the screen once — iOS wants a gesture. Then check the log for `audio guard` lines. |
 | Everything is slow | Graphics → Smooth or Low. Auto-degrade does this on its own. |
