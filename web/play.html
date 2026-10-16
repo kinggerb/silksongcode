@@ -1130,47 +1130,21 @@
     return { warn: 1000, alarm: 1400, crashHeap: null, learned: false };
   }
 
-  var HARD_MEMORY_CAP_MB = 1400;
+  var HARD_MEMORY_CAP_MB = Infinity;
   var memCapTimer = 0;
   var memCapSeconds = 0;
 
   function updateMemCapCorner() {
-    var msg = memCapSeconds > 0
-      ? 'Memory limit reached — reloading… (' + memCapSeconds + 's)'
-      : 'Memory limit reached — reloading…';
-    if (memCapEl) {
-      memCapEl.textContent = msg;
-      memCapEl.classList.remove('hidden');
-    }
-    if (fpsEl) {
-      fpsEl.textContent = msg;
-      fpsEl.style.color = '#ffd479';
-      fpsEl.classList.remove('hidden');
-    }
+    // Disabled: user requested removal of "reset after memory limit reached"
   }
 
   function startMemoryCapReload(heap) {
-    if (memCapTimer) return;
-    memCapSeconds = 5;
-    log('hard memory cap reached (' + heap + ' MB > ' + HARD_MEMORY_CAP_MB + ' MB) — reloading in 5s');
-    updateMemCapCorner();
-    memCapTimer = setInterval(function () {
-      memCapSeconds--;
-      if (memCapSeconds <= 0) {
-        clearInterval(memCapTimer);
-        memCapTimer = 0;
-        updateMemCapCorner();
-        markCleanExit();
-        try { location.reload(); } catch (e) {}
-        return;
-      }
-      updateMemCapCorner();
-    }, 1000);
+    // Disabled: do not reset the tab on memory threshold
+    log('memory watch: heap at ' + heap + ' MB (auto-reset disabled)');
   }
 
   function checkMemory() {
     if (!booted) return;
-    // User-facing memory warning pop-ups disabled; heartbeat enforces the 1.4 GB hard cap.
     writeHeartbeat();
   }
   function writeHeartbeat() {
@@ -1185,9 +1159,7 @@
       visible: !document.hidden,
     };
     writeStore(HEARTBEAT_KEY, JSON.stringify(hb));
-    if (booted && hb.heap !== null && hb.heap > HARD_MEMORY_CAP_MB) {
-      startMemoryCapReload(hb.heap);
-    }
+    // Hard memory reload disabled
     return hb;
   }
   function startHeartbeat() {
