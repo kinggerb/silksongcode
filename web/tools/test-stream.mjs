@@ -662,6 +662,99 @@ await test('cancelling a download releases the cache file too', async () => {
   server.stop();
 });
 
+section('segments of a bigger file');
+
+await test('a segment is fetched as a byte range and written at its own offset', async () => {
+  // A rebuilt archive is not a list of files but a list of ranges of them,
+  // each with a place in the new file.
+  const dir = path.join(TMP, 'segments');
+  await fsp.mkdir(dir, { recursive: true });
+  const whole = crypto.randomBytes(4096);
+  fs.writeFileSync(path.join(dir, 'archive.zip'), whole);
+  const server = await serveDir(dir);
+  const ranges = [];
+  const fetchImpl = async (url, opts) => {
+    const header = opts && opts.headers && opts.headers.Range;
+    if (header) ranges.push(String(header));
+    return fetch(String(url), opts);
+  };
+  const sink = new FakeOpfsSink({ name: 'seg.bin' });
+  await run({
+    sink,
+    ensure: {
+      segments: [
+        { url: server.url + 'archive.zip', rangeStart: 100, rangeEnd: 200, bytes: 100, outOffset: 0 },
+        { url: server.url + 'archive.zip', rangeStart: 1000, rangeEnd: 1200, bytes: 200, outOffset: 100 },
+      ],
+      expectedSize: 300,
+      cacheKey: 'seg.bin',
+      buildId: 'b',
+      fetchImpl,
+    },
+  });
+  eq(ranges.length, 2, 'both segments asked for their range');
+  eq(ranges[0], 'bytes=100-199', 'the first range is exact');
+  eq(ranges[1], 'bytes=1000-1199', 'and so is the second');
+  eq(sink.buffer.length, 300, 'the file is the size the segments add up to');
+  ok(sink.buffer.subarray(0, 100).equals(whole.subarray(100, 200)), 'the first segment is in the right place');
+  ok(sink.buffer.subarray(100, 300).equals(whole.subarray(1000, 1200)), 'and the second');
+  server.stop();
+});
+
+await test('a server that ignores the range still fills the right bytes', async () => {
+  const dir = path.join(TMP, 'norange');
+  await fsp.mkdir(dir, { recursive: true });
+  const whole = crypto.randomBytes(2048);
+  fs.writeFileSync(path.join(dir, 'archive.zip'), whole);
+  const server = await serveDir(dir);
+  const fetchImpl = async (url, opts) => {
+    const headers = new Headers((opts && opts.headers) || undefined);
+    headers.delete('Range');
+    return fetch(String(url), { headers, signal: opts && opts.signal });
+  };
+  const sink = new FakeOpfsSink({ name: 'nr.bin' });
+  await run({
+    sink,
+    ensure: {
+      segments: [
+        { url: server.url + 'archive.zip', rangeStart: 500, rangeEnd: 700, bytes: 200, outOffset: 0 },
+      ],
+      expectedSize: 200,
+      cacheKey: 'nr.bin',
+      buildId: 'b',
+      fetchImpl,
+    },
+  });
+  eq(sink.buffer.length, 200, 'the segment is the size it should be');
+  ok(sink.buffer.equals(whole.subarray(500, 700)), 'and holds the right bytes');
+  server.stop();
+});
+
+await test('a segment whose bytes are already in hand is written as it is', async () => {
+  const dir = path.join(TMP, 'local');
+  await fsp.mkdir(dir, { recursive: true });
+  const { parts, expected } = writeChunks(dir, 1, 64);
+  const server = await serveDir(dir);
+  const sink = new FakeOpfsSink({ name: 'local.bin' });
+  const tail = Buffer.from('the new directory');
+  await run({
+    sink,
+    ensure: {
+      segments: [
+        { url: server.url + parts[0].url, rangeStart: 0, rangeEnd: 64, bytes: 64, outOffset: 0 },
+        { data: new Uint8Array(tail), bytes: tail.length, outOffset: 64 },
+      ],
+      expectedSize: 64 + tail.length,
+      cacheKey: 'local.bin',
+      buildId: 'b',
+    },
+  });
+  eq(sink.buffer.length, 64 + tail.length, 'the file holds both pieces');
+  ok(sink.buffer.subarray(0, 64).equals(expected), 'the fetched part is right');
+  ok(sink.buffer.subarray(64).equals(tail), 'and the local one is too');
+  server.stop();
+});
+
 section('cache + resume');
 
 await test('a complete file with a matching marker is used without any download', async () => {

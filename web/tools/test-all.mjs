@@ -16,6 +16,7 @@ const suites = [
   ['stream loader', 'test-stream.mjs'],
   ['build manifest', 'test-manifest.mjs'],
   ['community build adapter', 'test-community-build.mjs'],
+  ['the smaller archive', 'test-zip-plan.mjs'],
   ['unity archive + patches', 'test-webdata.mjs'],
   ['save codec', 'test-save-codec.mjs'],
   ['prepare → verify pipeline', 'test-pipeline.mjs'],

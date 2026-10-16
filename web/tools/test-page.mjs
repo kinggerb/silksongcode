@@ -32,7 +32,7 @@ try {
  * ---------------------------------------------------------------- */
 
 const html = fs.readFileSync(path.join(WEB, 'play.html'), 'utf8');
-const libs = ['js/stream.js', 'js/manifest.js', 'js/community-build.js', 'js/save-codec.js', 'js/boss-scenes.js'].map((rel) =>
+const libs = ['js/stream.js', 'js/manifest.js', 'js/zip-plan.js', 'js/community-build.js', 'js/save-codec.js', 'js/boss-scenes.js'].map((rel) =>
   fs.readFileSync(path.join(WEB, ...rel.split('/')), 'utf8')
 );
 // The inline script is what runs the game page: pull it out so the libraries can

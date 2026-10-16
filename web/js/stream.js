@@ -486,11 +486,44 @@
    * One attempt at streaming a part into the sink.
    * p = {url, bytes, index, sink, partOffset, skip, signal, fetchImpl,
    *      progress, onAdvance, log, expectDigest}
+   *
+   * A part can also be a *segment* of the source:
+   *   p.data       — bytes we already have (a rebuilt ZIP's directory)
+   *   p.rangeStart — the first byte of the wanted range inside p.url
+   *   p.outOffset  — where the bytes land in the file (defaults to the
+   *                  part's own offset, which is the old behaviour)
    */
   async function fetchPartOnce(p) {
-    var res = await p.fetchImpl(p.url, { cache: 'default', signal: p.signal });
+    var outOffset = p.outOffset === undefined ? p.partOffset : p.outOffset;
+
+    // A segment whose bytes are already in hand: the new central directory
+    // of a rebuilt ZIP, for instance.
+    if (p.data) {
+      var local = p.data;
+      if (p.skip) local = local.subarray(p.skip);
+      if (local.length > p.bytes) local = local.subarray(0, p.bytes);
+      p.progress.written = 0;
+      p.onAdvance();
+      await p.sink.write(local, outOffset + p.skip, true);
+      p.progress.written = local.length;
+      p.onAdvance();
+      p.progress.written = 0;
+      p.onAdvance();
+      return;
+    }
+
+    // A segment of a bigger file: ask for just those bytes. A server that
+    // ignores the Range sends the whole file, and the loop below takes the
+    // part it wanted out of it.
+    var ranged = p.rangeStart !== undefined && p.rangeEnd !== undefined;
+    var request = { cache: 'default', signal: p.signal };
+    if (ranged) {
+      request.headers = { Range: 'bytes=' + (p.rangeStart + p.skip) + '-' + (p.rangeEnd - 1) };
+    }
+    var res = await p.fetchImpl(p.url, request);
     if (!res.ok) throw new Error('HTTP ' + res.status + ' for ' + p.url);
     if (!res.body) throw new Error('no readable body for ' + p.url);
+    var wholeFile = ranged && res.status !== 206;
 
     // "Checking game data": a part that is not the size the manifest measured
     // has to be caught here instead of inside Unity, where it shows up as a
@@ -515,7 +548,9 @@
     // arrive below, which rejects a short part and an oversized one just as
     // firmly.
     var log = makeLogger(p.log);
-    if (p.bytes > 0 && res.headers && typeof res.headers.get === 'function') {
+    // A ranged response announces the length of the range, not of the file,
+    // so the check below does not apply to it.
+    if (!ranged && p.bytes > 0 && res.headers && typeof res.headers.get === 'function') {
       var declared = Number(res.headers.get('content-length') || 0) || 0;
       if (declared && declared !== p.bytes) {
         var truthful = contentLengthIsTruthful(p.url, res);
@@ -542,7 +577,12 @@
     // partOffset + skip rather than partOffset — getting this wrong silently
     // shifts the whole tail of the file (the Hollow Knight page's copy of this
     // loop had that bug: a resume that stopped mid-chunk corrupted the archive).
-    var place = p.partOffset + p.skip;
+    var place = outOffset + p.skip;
+    // The bytes at the head of the response that are not ours: the resume
+    // skip, and — when a server ignores the Range header and sends the whole
+    // file — everything before the range we asked for.
+    var bodyPrefix = wholeFile ? p.rangeStart + p.skip : (ranged ? 0 : p.skip);
+    var want = p.bytes - p.skip;
     var inFlight = [];
     var lastFlushAt = 0;
     var failed = null;
@@ -566,19 +606,36 @@
         // file. Failing here rather than after the download keeps the message
         // accurate — and unlike a short read, this will not fix itself on a
         // retry, so fetchPartTo treats it as permanent.
-        if (p.bytes > 0 && received > p.bytes) {
+        //
+        // A ranged part is exempt: a server that ignores the Range sends the
+        // whole file, and the bytes past the range are trimmed below.
+        if (!ranged && p.bytes > 0 && received > p.bytes) {
           throw new Error(
             'part ' + p.index + ' is bigger than the manifest: ' + received + ' bytes received, ' +
               p.bytes + ' expected — rebuild or re-run prepare-build.mjs'
           );
         }
 
-        if (received <= p.skip) {
+        // Drop the head of the chunk that belongs to something else.
+        var begin = start - bodyPrefix;
+        if (begin < 0) {
+          var drop = Math.min(value.byteLength, -begin);
+          value = value.subarray(drop);
+          begin += drop;
+        }
+        if (!value.byteLength) {
           p.onAdvance();
           continue;
         }
+        // And the tail that belongs to the next segment.
+        var room = want - written;
+        if (value.byteLength > room) value = value.subarray(0, Math.max(0, room));
+        if (!value.byteLength) {
+          p.onAdvance();
+          break;
+        }
 
-        var usable = start >= p.skip ? value : value.subarray(p.skip - start);
+        var usable = value;
         var at = place;
         place += usable.byteLength;
         written += usable.byteLength;
@@ -614,7 +671,6 @@
       throw failed;
     }
 
-    var want = p.bytes - p.skip;
     if (written !== want) {
       p.progress.written = 0;
       p.onAdvance();
@@ -678,6 +734,10 @@
     for (i = 0; i < parts.length; i++) {
       parts[i].bytes = parts[i].bytes || 0;
       parts[i].offset = total;
+      // Where the bytes land in the file. For a plain list of parts that is
+      // simply the running total; a segment list (a rebuilt archive) says
+      // where each piece goes.
+      if (parts[i].outOffset === undefined) parts[i].outOffset = total;
       total += parts[i].bytes;
     }
 
@@ -714,7 +774,7 @@
 
         for (i = 0; i < parts.length; i++) {
           var part = parts[i];
-          if (part.offset + part.bytes <= startOffset) {
+          if (part.outOffset + part.bytes <= startOffset) {
             written[i] = part.bytes;
             continue;
           }
@@ -764,7 +824,7 @@
 
         async function runPart(index) {
           var p = parts[index];
-          var skip = Math.max(0, startOffset - p.offset);
+          var skip = Math.max(0, startOffset - p.outOffset);
           var progress = { written: 0 };
           var onAdvance = makeAdvance(index, progress, skip);
 
@@ -773,8 +833,12 @@
             bytes: p.bytes,
             index: index + 1,
             sink: sink,
-            partOffset: p.offset,
+            partOffset: p.outOffset,
+            outOffset: p.outOffset,
             skip: skip,
+            data: p.data,
+            rangeStart: p.rangeStart,
+            rangeEnd: p.rangeEnd,
             signal: opts.signal,
             fetchImpl: fetchImpl,
             log: opts.log,
@@ -1048,6 +1112,10 @@
     var log = makeLogger(opts.onLog);
     var dirName = opts.dirName || DEFAULT_DIR;
     var expectedSize = opts.expectedSize || 0;
+    // A "segment list" is a list of parts that says where each piece of a
+    // file lands (a rebuilt archive, for instance). It is used exactly like
+    // a list of parts, so the two are interchangeable here.
+    if (opts.segments && !opts.parts) opts.parts = opts.segments;
     var caps = opts.caps || (await detect());
     var sink = null;
 

@@ -24,6 +24,10 @@ maintainer's request, with their stated permission to reuse it.
   means a hundred round trips, which is minutes of waiting on a phone — and
   each part is written to disk at its own offset as it arrives, so the queue
   costs a few chunks of RAM rather than a few parts.
+- **Most of that archive is never downloaded.** Before the download starts, the
+  player reads the ZIP's own index (its central directory) with two small byte
+  range requests, works out which files inside it are needed, and then fetches
+  only those — see [The smaller archive](#the-smaller-archive) below.
 - `zip.js` reads the archive from OPFS and extracts only the bundle Unity asks
   for; the page does not concatenate the ZIP or unpack all bundles in RAM.
 - A cutscene request is answered with a ~600-byte blank container (the same
@@ -36,6 +40,50 @@ The first run therefore needs Wi-Fi, a normal (non-Private) Safari tab, and
 roughly 2 GiB of free storage. Leave the tab in the foreground. Later runs reuse
 the cached archive. If OPFS or the available quota is insufficient, the player
 will explain that rather than trying to put a multi-gigabyte ZIP in RAM.
+
+## The smaller archive
+
+The published archive is one 1.94 GiB ZIP, and a good part of it is the
+high-definition cutscenes — the very files the player answers with a
+placeholder instead of the real bytes. Downloading them is an hour on a phone
+and a gigabyte of storage nobody can use.
+
+So the player looks before it leaps. A ZIP keeps its index (the *central
+directory*) at the end of the file, and that index says where every file
+inside it lives. Two small range requests — the last 64 KB and the directory
+itself — are enough to read it, and they cost a few hundred kilobytes instead
+of two gigabytes.
+
+With the index in hand the player:
+
+1. **Decides what to leave out.** The cutscenes (by name, and by the bytes at
+   the start of the file: a Unity bundle starts with `UnityFS`, a video with
+   `ftyp` or the WebM magic) and any bundle for another platform (a WebGL
+   build never loads one). The bytes are only looked at for the big files, and
+   the result is remembered, so it is a one-off.
+2. **Fetches only what is left**, in byte ranges of the published parts, and
+   writes the files it kept into a new, smaller ZIP. The files are copied byte
+   for byte — nothing is recompressed, so the game data cannot be damaged —
+   and the ZIP's directory is rewritten to match the new offsets.
+3. **Serves the cutscenes from the placeholder** as before, so a file that is
+   no longer in the archive is answered rather than 404'd.
+
+The result is an ordinary ZIP: `zip.js` reads it exactly as it reads the
+published one, and the file on the device is smaller as well as the download.
+The page shows the real figure once the index has been read.
+
+If anything about this does not work — the CDN does not honour byte ranges,
+the archive is not shaped the way we expect, the index cannot be read — the
+player falls back to downloading the whole archive, exactly as before. The
+pruning is an optimisation, never a requirement.
+
+`js/zip-plan.js` does the reading and the planning; `js/stream.js` moves the
+bytes; `js/community-build.js` ties them together. `tools/test-zip-plan.mjs`
+checks the whole thing against an archive built with `zip.js`: that the index
+is read with two small requests, that the cutscenes are the files that are left
+out, that the files that are kept come out byte for byte the same, that the
+new archive is smaller, that a download of it can be resumed, and that a CDN
+without byte ranges gets the whole archive instead.
 
 The game payload remains hosted at the pinned external source; it is **not**
 committed under `web/Build/`. This avoids a multi-gigabyte repository and lets
