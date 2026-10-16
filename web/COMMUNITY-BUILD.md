@@ -43,3 +43,27 @@ paths and serve the Unity `.unityweb` files and split ZIP parts unchanged).
 
 `zip.js` is distributed under the BSD 3-Clause license; the license notice is
 in [`js/zip-LICENSE.txt`](js/zip-LICENSE.txt).
+
+## What the upstream loader expects from the page
+
+The upstream `Build/w-pt.loader.js` is not stock Unity. Upstream serves it from
+a page whose `<head>` carries
+`<base href="https://cdn.jsdelivr.net/gh/web-ports/hollow-knight-silksong@master/">`,
+and `createUnityInstance` was changed to ignore the `streamingAssetsUrl` it is
+given in favour of:
+
+```js
+b.streamingAssetsUrl = new URL("StreamingAssets", document.querySelector('base').href).href;
+```
+
+Without a `<base>` that line throws as soon as Unity is started, which on iPad
+Safari reads `null is not an object (evaluating
+'document.querySelector('base').href')` — after the whole archive has been
+downloaded. A real `<base href>` cannot fix it: it would re-root every relative
+URL of `play.html` onto the CDN. So `play.html` adds a `<base>` **without** an
+`href` attribute, which does not change the document's base URL, and gives
+that element an `href` property that answers with the community asset root
+(the pinned `base`, or `?communityBase=`). The loader therefore computes the
+same StreamingAssets URL the page passes anyway, and the element stays for the
+life of the page in case anything reads it again later.
+`tools/test-page.mjs` runs that exact upstream line against the page.

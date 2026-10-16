@@ -7,7 +7,9 @@
  * the frame limiter, the crash ladder, the memory ladder, the touch pad, the
  * save import/export plumbing and the "check the data first" step. These tests
  * boot play.html in jsdom with a stubbed Unity loader and fake data, and drive
- * the same code the player's fingers drive.
+ * the same code the player's fingers drive — including the hand-off to the
+ * community build's loader, which is not stock Unity and reads the page's
+ * <base> element (the stub runs that upstream line verbatim).
  * ==========================================================================*/
 
 import { section, test, eq, ok, done } from './testkit.mjs';
@@ -181,6 +183,88 @@ await test('a prepared manifest takes priority over the community fallback', asy
   await new Promise((resolve) => setTimeout(resolve, 0));
   eq(win.SKPerf.internals().buildSource(), 'prepared', 'the local prepared build remains selected');
   eq(win.document.getElementById('startBtn').disabled, false, 'the prepared build can start');
+  win.close();
+});
+
+section('starting the community build');
+
+// The community loader (Build/w-pt.loader.js at the pinned commit) is not stock
+// Unity: web-ports added one line to createUnityInstance — copied verbatim
+// below — that ignores config.streamingAssetsUrl and asks the page's <base>
+// instead. Their index.html has <base href="https://cdn.jsdelivr.net/gh/
+// web-ports/hollow-knight-silksong@master/">; play.html has none, so on the
+// iPad this died with "null is not an object (evaluating
+// 'document.querySelector('base').href')" right after the 2 GB archive was cached.
+const UPSTREAM_LOADER = `
+  window.__upstream = { seen: null, passed: null, later: null, laterError: null };
+  function createUnityInstance(t, n, l) {
+    var b = {};
+    for (var o in n) b[o] = n[o];
+    b.streamingAssetsUrl = new URL("StreamingAssets",document.querySelector('base').href).href;
+    window.__upstream.seen = b.streamingAssetsUrl;
+    window.__upstream.passed = n.streamingAssetsUrl;
+    l(0);
+    return new Promise(function (resolve) {
+      setTimeout(function () {
+        // Anything that asks again later (the framework, a jslib) must get the same answer.
+        try {
+          window.__upstream.later = new URL("StreamingAssets", document.querySelector('base').href).href;
+        } catch (e) {
+          window.__upstream.laterError = String((e && e.message) || e);
+        }
+        l(1);
+        resolve({ Module: b, SendMessage: function () {}, SetFullscreen: function () {}, Quit: function () { return Promise.resolve(); } });
+      }, 0);
+    });
+  }
+`;
+
+await test('the community loader finds the <base> it was written for, and the page is not re-rooted', async () => {
+  const source = JSON.parse(fs.readFileSync(path.join(WEB, 'community-build.json'), 'utf8'));
+  const fetchImpl = async (url) => {
+    const clean = String(url).replace(/^https?:\/\/[^/]+\//, '');
+    if (clean === 'community-build.json') return { ok: true, status: 200, json: async () => source };
+    return { ok: false, status: 404, headers: new Map(), text: async () => '' };
+  };
+  const win = bootPage({ fetchImpl });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  // Storage, the 2 GB archive and its ZIP index have their own suites; here
+  // they only have to hand over to Unity the way they do once the archive is cached.
+  win.SKStream.detect = async () => ({ opfs: true, available: 4e9, quota: 5e9, usage: 0, secure: true });
+  win.SKCommunityBuild.ensureArchive = async () => ({ file: new win.Blob(['zip']), dispose() {} });
+  win.SKCommunityBuild.openArchive = async () => ({ entryCount: 1, entryFor: () => null, blobFor: async () => null, close() {} });
+  // jsdom does not fetch <script src>, so run the loader when the page appends it.
+  const loaderUrl = source.base + source.unity.loader;
+  const append = win.document.body.appendChild.bind(win.document.body);
+  win.document.body.appendChild = (node) => {
+    if (node && node.tagName === 'SCRIPT' && node.src === loaderUrl) {
+      win.eval(UPSTREAM_LOADER);
+      setTimeout(() => node.onload && node.onload(), 0);
+      return node;
+    }
+    return append(node);
+  };
+
+  win.document.getElementById('startBtn').click();
+  const errEl = win.document.getElementById('err');
+  const failure = () => (!errEl.classList.contains('hidden') && errEl.textContent.trim().split('\n')[0]) || '';
+  for (let i = 0; i < 400 && !win.unityInstance && !failure(); i++) await new Promise((resolve) => setTimeout(resolve, 5));
+
+  eq(failure(), '', 'the start failed with');
+  ok(win.unityInstance, 'Unity was started');
+  const expected = source.base + 'StreamingAssets';
+  eq(win.__upstream.seen, expected, 'the loader derived StreamingAssets from the community asset root');
+  eq(win.__upstream.passed, expected, 'which is the URL the page passes in the config anyway');
+  eq(win.__upstream.laterError, null, 'a later read of the <base> does not throw either');
+  eq(win.__upstream.later, expected, 'and gets the same answer');
+  eq(win.document.querySelectorAll('base').length, 1, 'exactly one <base>');
+  eq(win.document.querySelector('base').getAttribute('href'), null, 'and it has no href attribute');
+  eq(win.document.baseURI, 'https://example.test/play.html', 'so the page keeps its own base URL');
+  eq(
+    win.document.querySelector('a[href="COMMUNITY-BUILD.md"]').href,
+    'https://example.test/COMMUNITY-BUILD.md',
+    'and its relative links still point at this site, not at the CDN'
+  );
   win.close();
 });
 
