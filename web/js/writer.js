@@ -23,7 +23,7 @@
  *   {id, type:'putText', dir, name, text}               -> {ok:true}
  *   {id, type:'getText', dir, name}                     -> {text|null}
  *   {id, type:'remove',  dir, name}                     -> {ok:true}
- *   {id, type:'quit'}                                   -> (no reply)
+ *   {id, type:'quit'}                                   -> {ok:true}
  *   any failure                                         -> {id, error:{name,message,op}}
  * ==========================================================================*/
 
@@ -128,7 +128,14 @@ self.onmessage = async function (event) {
           throw new Error('short write: ' + written + '/' + bytes.byteLength + ' bytes at ' + msg.at);
         }
         if (msg.flush) syncHandle.flush();
-        reply(id, { written: written, size: syncHandle.getSize() });
+        reply(id, { written: written });
+        break;
+      }
+
+      case 'flush': {
+        if (!syncHandle) throw new Error('flush before open');
+        syncHandle.flush();
+        reply(id, { ok: true });
         break;
       }
 
@@ -193,6 +200,7 @@ self.onmessage = async function (event) {
 
       case 'quit': {
         await closeHandle();
+        reply(id, { ok: true });
         self.close();
         break;
       }

@@ -45,12 +45,16 @@
       throw fail('community build configuration has an invalid asset archive mirror');
     }
 
+    ['bundleBase', 'index'].forEach(function (field) {
+      if (archive[field] !== undefined && (typeof archive[field] !== 'string' || !archive[field])) throw fail('invalid asset archive ' + field);
+    });
     var total = 0;
     var names = Object.create(null);
     archive.parts.forEach(function (part, index) {
       if (!part || typeof part.path !== 'string' || !part.path || !Number.isSafeInteger(part.bytes) || part.bytes <= 0) {
         throw fail('invalid asset archive part ' + (index + 1));
       }
+      if (part.sha256 !== undefined && !/^[a-f0-9]{64}$/.test(part.sha256)) throw fail('invalid asset archive part digest');
       if (names[part.path]) throw fail('duplicate asset archive part: ' + part.path);
       names[part.path] = true;
       total += part.bytes;
@@ -409,6 +413,7 @@
       return !response || response.ok || !retryableStatus(response.status);
     }
 
+    var mirrorRefused = false;
     return async function mirroredFetch(input, init) {
       var url = urlOf(input);
       var fallback = mirrorUrlFor(url, base, mirror);
@@ -419,7 +424,6 @@
       // jsDelivr refuses this package outright, for every part it has not
       // already cached, and no amount of waiting changes that. Once it has
       // said no, it is not asked again for the rest of the download.
-      var mirrorRefused = false;
 
       /** What the page shows while a pause runs (a countdown, so it reads as waiting rather than hanging). */
       function ticking(left) {
@@ -499,9 +503,24 @@
    * wrapped so a refused or unreachable part is asked for again from the
    * mirror named in the descriptor, and so a rate limit is waited out.
    */
+  function timedFetch(fetchImpl, timeoutMs) {
+    return async function (url, init) {
+      init = init || {};
+      if (typeof AbortController === 'undefined') return fetchImpl(url, init);
+      var controller = new AbortController(), expired = false;
+      var abort = function () { controller.abort(); };
+      if (init.signal && init.signal.aborted) abort();
+      if (init.signal) init.signal.addEventListener('abort', abort, { once: true });
+      var timer = setTimeout(function () { expired = true; controller.abort(); }, timeoutMs || 30000);
+      try { return await fetchImpl(url, Object.assign({}, init, { signal: controller.signal })); }
+      catch (error) { if (expired) throw new Error('connection stalled before response headers'); throw error; }
+      finally { clearTimeout(timer); if (init.signal) init.signal.removeEventListener('abort', abort); }
+    };
+  }
+
   function archiveFetch(config, options, base, limit) {
     var archive = config.assetArchive || {};
-    return mirrorFetch(options.fetchImpl, {
+    return mirrorFetch(timedFetch(options.fetchImpl || function (url, init) { return fetch(url, init); }, options.headerTimeoutMs), {
       base: base,
       mirror: archive.mirror,
       onLog: options.onLog,
@@ -546,7 +565,7 @@
     validate(config);
     var root = archiveBase(config, base);
     return config.assetArchive.parts.map(function (part) {
-      return { url: join(root, part.path), bytes: part.bytes };
+      return { url: join(root, part.path), bytes: part.bytes, sha256: part.sha256 || null };
     });
   }
 
@@ -790,6 +809,8 @@
       buildId: config.buildId,
       mime: archive.mime || 'application/zip',
       verify: 'size',
+      cacheOnly: options.cacheOnly,
+      stallTimeoutMs: options.stallTimeoutMs,
       workerUrl: options.workerUrl || 'js/writer.js',
       writerFactory: options.writerFactory,
       preferDisk: true,
@@ -1084,8 +1105,9 @@
     return 'mp4';
   }
 
-  async function openArchive(file, zipLib) {
-    if (!file || typeof file.slice !== 'function') throw fail('the cached asset archive is not readable');
+  async function openArchive(file, zipLib, options) {
+    options = options || {};
+    if (!file || (typeof file.slice !== 'function' && typeof file.readUint8Array !== 'function')) throw fail('the cached asset archive is not readable');
     zipLib = zipLib || (typeof zip !== 'undefined' ? zip : null);
     if (!zipLib || !zipLib.ZipReader || !zipLib.BlobReader || !zipLib.BlobWriter) {
       throw fail('the ZIP reader did not load');
@@ -1099,10 +1121,16 @@
     // BlobReader uses slices of the file, so only the ZIP directory and the
     // requested bundle are read. The multi-gigabyte archive is never converted
     // into one ArrayBuffer.
-    var reader = new zipLib.ZipReader(new zipLib.BlobReader(file), { useWebWorkers: false });
+    var input;
+    if (typeof file.readUint8Array === 'function') {
+      input = new zipLib.Reader();
+      input.size = file.size; input.initialized = true;
+      input.readUint8Array = file.readUint8Array.bind(file);
+    } else input = new zipLib.BlobReader(file);
+    var reader = options.entries ? { close: function () { return Promise.resolve(); } } : new zipLib.ZipReader(input, { useWebWorkers: false });
     var entries;
     try {
-      entries = await reader.getEntries();
+      entries = options.entries || await reader.getEntries();
     } catch (error) {
       try { await reader.close(); } catch (e) {}
       throw fail('could not read the cached StreamingAssets ZIP: ' + ((error && error.message) || error));
@@ -1144,21 +1172,154 @@
     async function blobFor(entry) {
       var key = String(entry.filename || '');
       if (inFlight[key]) return inFlight[key];
-      var promise = entry.getData(new zipLib.BlobWriter('application/octet-stream'), { useWebWorkers: false });
+      var promise = (async function () {
+        var start = Date.now();
+        if (options.onStatus) options.onStatus('Loading ' + basename(key).replace(/_[a-f0-9]{20,}/g, '') + '…');
+        var cached = options.bundleCache ? await options.bundleCache.get(entry) : null;
+        if (cached) return cached;
+        if (options.bundleBase) {
+          var direct = await options.stream.ensureDataset({
+            parts: [{ url: join(options.bundleBase, entry.filename.split('/').map(encodeURIComponent).join('/')), bytes: entry.uncompressedSize }],
+            expectedSize: entry.uncompressedSize,
+            cacheKey: 'direct-' + options.buildId + '-' + encodeURIComponent(entry.filename),
+            buildId: options.buildId, mime: 'application/octet-stream',
+            workerUrl: options.workerUrl || 'js/writer.js', preferDisk: true, allowMemoryFallback: false,
+            fetchImpl: options.fetchImpl, onLog: options.onLog, signal: options.signal,
+            stallTimeoutMs: options.stallTimeoutMs,
+          });
+          try {
+            if (await crc32File(direct.file) !== entry.signature) {
+              direct.dispose();
+              await options.stream.removeDataset('direct-' + options.buildId + '-' + encodeURIComponent(entry.filename));
+              throw fail('direct bundle CRC mismatch: ' + entry.filename);
+            }
+            return direct.file;
+          } finally { direct.dispose(); }
+        }
+        // Prefetch only the compressed extent of the bundle Unity requested.
+        // Reader slices remain small, while network parts fill the connection.
+        var prefetch = file.prefetchEntry ? file.prefetchEntry(entry) : null;
+        if (prefetch) prefetch.catch(function () {});
+        var blob;
+        if (options.bundleCache) blob = await options.bundleCache.extract(entry, zipLib);
+        if (!blob) blob = await entry.getData(new zipLib.BlobWriter('application/octet-stream'), {
+          useWebWorkers: false, checkSignature: true,
+        });
+        if (prefetch) await prefetch;
+        if (options.onLog) options.onLog('bundle ready: ' + key + ' (' + blob.size + ' bytes, ' + (Date.now() - start) + ' ms)');
+        return blob;
+      })();
       inFlight[key] = promise;
-      try {
-        return await promise;
-      } finally {
-        delete inFlight[key];
-      }
+      try { return await promise; } finally { delete inFlight[key]; }
     }
 
     return {
       entryFor: entryFor,
       blobFor: blobFor,
       entryCount: entries.length,
-      close: function () { return reader.close(); },
+      entries: entries,
+      stats: file.stats || null,
+      close: async function () { try { await reader.close(); } finally { if (options.bundleCache) options.bundleCache.dispose(); } },
     };
+  }
+
+  var crcTable = null;
+  async function crc32File(file) {
+    if (!crcTable) {
+      crcTable = new Uint32Array(256);
+      for (var i = 0; i < 256; i++) {
+        var c = i;
+        for (var j = 0; j < 8; j++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+        crcTable[i] = c;
+      }
+    }
+    var crc = 0xffffffff, reader = file.stream().getReader();
+    try {
+      for (;;) {
+        var item = await reader.read(); if (item.done) break;
+        for (var k = 0; k < item.value.length; k++) crc = crcTable[(crc ^ item.value[k]) & 255] ^ (crc >>> 8);
+      }
+    } finally { await reader.cancel(); }
+    return (crc ^ 0xffffffff) >>> 0;
+  }
+
+  function validateBundleIndex(index, total) {
+    if (!index || index.schema !== 1 || index.bytes !== total || !Array.isArray(index.entries) || !index.entries.length || index.entries.length > 100000) throw fail('invalid bundle index');
+    var names = new Set();
+    index.entries.forEach(function (entry) {
+      if (!entry || typeof entry.filename !== 'string' || !entry.filename || entry.filename[0] === '/' ||
+          entry.filename.indexOf('\\') >= 0 || entry.filename.split('/').indexOf('..') >= 0 || names.has(entry.filename) ||
+          !Number.isSafeInteger(entry.uncompressedSize) || entry.uncompressedSize < 0 ||
+          !Number.isSafeInteger(entry.signature) || entry.signature < 0 || entry.signature > 0xffffffff) throw fail('invalid bundle index entry');
+      names.add(entry.filename);
+    });
+    return index.entries;
+  }
+
+  async function openLazyArchive(config, options) {
+    options = options || {};
+    validate(config);
+    var stream = options.stream || (typeof SKStream !== 'undefined' ? SKStream : null);
+    var cache = options.cache || (typeof SKAssetCache !== 'undefined' ? SKAssetCache : null);
+    if (!cache && typeof require === 'function') cache = require('./asset-cache.js');
+    if (!stream || !cache) throw fail('the disk-backed lazy asset loader did not load');
+    var bundleCache = cache.createBundleCache({ stream: stream, buildId: config.buildId + ':' + config.assetArchive.cacheKey,
+      workerUrl: options.workerUrl, budgetBytes: options.bundleCacheBytes, onLog: options.onLog });
+    var archiveOptions = Object.assign({}, options, { stream: stream, buildId: config.buildId, bundleCache: bundleCache });
+    if (options.bundleBase && config.assetArchive.index) {
+      var indexUrl = new URL(config.assetArchive.index, archiveBase(config, options.base)).href;
+      var fetchIndex = timedFetch(options.fetchImpl || function (url, init) { return fetch(url, init); }, options.headerTimeoutMs);
+      var indexResponse = await fetchIndex(indexUrl, { cache: 'force-cache', signal: options.signal });
+      if (!indexResponse.ok) throw fail('bundle index HTTP ' + indexResponse.status);
+      archiveOptions.entries = validateBundleIndex(await indexResponse.json(), config.assetArchive.total);
+      return openArchive(new Blob([]), options.zip, archiveOptions);
+    }
+    // Reuse an existing complete monolithic download without copying it into
+    // parts. A cache miss never downloads the whole archive in lazy mode.
+    var existing = !options.skipCompleteCache && stream.getCachedDataset ? await stream.getCachedDataset({
+      cacheKey: config.assetArchive.cacheKey, buildId: config.buildId,
+      expectedSize: config.assetArchive.total, mime: 'application/zip', onLog: options.onLog,
+    }) : null;
+    if (existing) {
+      try {
+        var mounted = await openArchive(existing.file, options.zip, archiveOptions);
+        if (!options.bundleBase) {
+          var originalBlobFor = mounted.blobFor, recovered = null;
+          mounted.blobFor = async function (entry) {
+            try { if (!recovered) return await originalBlobFor(entry); }
+            catch (error) {
+              if (options.signal && options.signal.aborted) throw error;
+              if (options.onLog) options.onLog('old complete ZIP failed validation; recovering from immutable parts: ' + error.message);
+              if (!recovered) recovered = (async function () {
+                await stream.removeDataset(config.assetArchive.cacheKey);
+                return openLazyArchive(config, Object.assign({}, options, { skipCompleteCache: true }));
+              })();
+            }
+            var replacement = await recovered;
+            var match = replacement.entryFor('https://cache.invalid/StreamingAssets/' + entry.filename);
+            if (!match) throw fail('recovered archive is missing ' + entry.filename);
+            return replacement.blobFor(match);
+          };
+          var closeOriginal = mounted.close;
+          mounted.close = async function () {
+            await closeOriginal();
+            if (recovered) { var replacement = await recovered; await replacement.close(); }
+          };
+        }
+        return mounted;
+      } catch (error) {
+        if (options.onLog) options.onLog('old complete ZIP index is invalid; using lazy parts: ' + error.message);
+        await stream.removeDataset(config.assetArchive.cacheKey);
+      } finally { existing.dispose(); }
+    }
+    var base = archiveBase(config, options.base);
+    var limit = archiveRateLimit(options);
+    var input = cache.createPartReader(parts(config, base), Object.assign({}, options, {
+      stream: stream, buildId: config.buildId, cacheKey: config.assetArchive.cacheKey,
+      fetchImpl: archiveFetch(config, options, base, limit),
+      retryAfter: limit && limit.canWait() ? archiveRetryAfter() : null,
+    }));
+    return openArchive(input, options.zip, archiveOptions);
   }
 
   function rangeResponse(blob, rangeHeader, contentType) {
@@ -1285,6 +1446,10 @@
     ensureArchive: ensureArchive,
     planArchive: planArchive,
     openArchive: openArchive,
+    openLazyArchive: openLazyArchive,
+    timedFetch: timedFetch,
+    crc32File: crc32File,
+    validateBundleIndex: validateBundleIndex,
     installFetchMount: installFetchMount,
     // Exported for the test suite: the fetch `ensureArchive` downloads with,
     // which asks the descriptor's mirror once when the archive's own host

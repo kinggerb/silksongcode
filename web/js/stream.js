@@ -40,7 +40,7 @@
 })(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
 
-  var VERSION = '1.0.4';
+  var VERSION = '1.1.0';
   var DEFAULT_DIR = 'silksong-webgl-cache';
   var FLUSH_EVERY = 32 * 1024 * 1024; // flush OPFS about every 32 MB
   var MAX_RETRIES = 4; // per part (positional sinks only)
@@ -54,7 +54,7 @@
   // RAM cost stays at a few chunks because the parts are written to the
   // sink as they arrive instead of being buffered.
   var DEFAULT_CONCURRENCY = 4;
-  var MAX_CONCURRENCY = 4;
+  var MAX_CONCURRENCY = 8;
   var WRITE_TIMEOUT = 180000; // ms per worker write
   var OPEN_TIMEOUT = 60000; // ms for open/stat/marker calls
   var PROGRESS_THROTTLE = 120; // ms
@@ -281,6 +281,10 @@
     await this.call({ type: 'write', data: buf.buffer, at: at, flush: !!flush }, WRITE_TIMEOUT, [buf.buffer]);
   };
 
+  WorkerSink.prototype.flush = async function () {
+    await this.call({ type: 'flush' }, OPEN_TIMEOUT);
+  };
+
   WorkerSink.prototype.finish = async function () {
     var res = await this.call({ type: 'finish' }, OPEN_TIMEOUT);
     return { size: res.size };
@@ -504,21 +508,44 @@
    *   p.outOffset  — where the bytes land in the file (defaults to the
    *                  part's own offset, which is the old behaviour)
    */
+  // A body can stall after a successful HTTP response. Cancel its reader so
+  // retry never leaves a second, invisible download running in the background.
+  function readWithTimeout(reader, timeoutMs, signal) {
+    var ms = timeoutMs === undefined ? 45000 : timeoutMs;
+    if (!(ms > 0) && !signal) return reader.read();
+    return new Promise(function (resolve, reject) {
+      var timer;
+      function cleanup() {
+        clearTimeout(timer);
+        if (signal) signal.removeEventListener('abort', aborted);
+      }
+      function failed(error) {
+        cleanup();
+        Promise.resolve(reader.cancel(error)).catch(noop);
+        reject(error);
+      }
+      function aborted() { failed(abortError()); }
+      if (signal && signal.aborted) return aborted();
+      if (signal) signal.addEventListener('abort', aborted, { once: true });
+      if (ms > 0) timer = setTimeout(function () { failed(new Error('download body stalled for ' + ms + ' ms')); }, ms);
+      reader.read().then(function (value) { cleanup(); resolve(value); }, function (error) { cleanup(); reject(error); });
+    });
+  }
+
   async function fetchPartOnce(p) {
     var outOffset = p.outOffset === undefined ? p.partOffset : p.outOffset;
 
     // A segment whose bytes are already in hand: the new central directory
     // of a rebuilt ZIP, for instance.
     if (p.data) {
-      var local = p.data;
+      var local = new Uint8Array(p.data); // keep retry source intact after transfer
       if (p.skip) local = local.subarray(p.skip);
       if (local.length > p.bytes) local = local.subarray(0, p.bytes);
       p.progress.written = 0;
       p.onAdvance();
+      var localLength = local.byteLength;
       await p.sink.write(local, outOffset + p.skip, true);
-      p.progress.written = local.length;
-      p.onAdvance();
-      p.progress.written = 0;
+      p.progress.written = localLength;
       p.onAdvance();
       return;
     }
@@ -606,7 +633,7 @@
 
     try {
       for (;;) {
-        var chunk = await reader.read();
+        var chunk = await readWithTimeout(reader, p.stallTimeoutMs, p.signal);
         if (chunk.done) break;
         var value = chunk.value;
         if (!value || !value.byteLength) continue;
@@ -690,7 +717,7 @@
       p.onAdvance();
       throw new Error('part ' + p.index + ' ended early: ' + written + '/' + want + ' bytes');
     }
-    p.progress.written = 0;
+    p.progress.written = written;
     p.onAdvance();
   }
 
@@ -784,7 +811,8 @@
     var concurrency = sink.sequentialOnly ? 1 : Math.max(1, Math.min(wanted, MAX_CONCURRENCY, parts.length));
     // Every part keeps a few writes in flight; with several parts running
     // that adds up, so the budget is shared.
-    var writesPerPart = Math.max(2, Math.floor(MAX_WRITES_IN_FLIGHT / concurrency));
+    var writesPerPart = Math.max(1, Math.floor(MAX_WRITES_IN_FLIGHT / concurrency));
+    log('download concurrency: ' + concurrency + (sink.sequentialOnly ? ' (sequential storage fallback)' : ''));
 
     var passes = sink.sequentialOnly ? SEQ_RETRIES : 1;
     var lastErr = null;
@@ -809,13 +837,15 @@
 
         for (i = 0; i < parts.length; i++) {
           var part = parts[i];
-          if (part.outOffset + part.bytes <= startOffset) {
+          if ((opts.completedParts && opts.completedParts[i]) || part.outOffset + part.bytes <= startOffset) {
             written[i] = part.bytes;
             continue;
           }
           written[i] = 0;
           todo.push(i);
         }
+
+        var initiallyDone = written.reduce(function (sum, n) { return sum + n; }, 0);
 
         function accounted() {
           var sum = 0;
@@ -830,7 +860,7 @@
           lastReport = t;
           var done = accounted();
           var elapsed = (t - began) / 1000;
-          var rate = elapsed > 0.5 ? done / elapsed : 0;
+          var rate = elapsed > 0.5 ? Math.max(0, done - initiallyDone) / elapsed : 0;
           opts.onProgress({
             loaded: Math.min(done, total),
             total: total,
@@ -849,7 +879,7 @@
             // count only ever grows: the streamer resets it to zero when a
             // part is done, and the progress bar must not fall back.
             var value = skip + prog.written;
-            if (value > written[index]) written[index] = value;
+            written[index] = value;
             report(false);
           };
         }
@@ -882,8 +912,10 @@
             maxWritesInFlight: writesPerPart,
             retryAfter: opts.retryAfter,
             retryAttempts: opts.retryAttempts,
+            stallTimeoutMs: opts.stallTimeoutMs,
           });
 
+          if (opts.onPartDone) await opts.onPartDone(index);
           written[index] = p.bytes;
           report(true);
         }
@@ -1146,7 +1178,31 @@
    *   retryAfter (a caller-owned backoff: f(error, attempt) -> ms, -1 to stop)
    * @returns {Promise<{url,size,kind,file,sink,dispose,verify}>}
    */
+  function markerMatches(text, buildId) {
+    return typeof text === 'string' && text.split(/\s/)[0] === buildId;
+  }
+
+  async function getCachedDataset(opts) {
+    try {
+      var root = await navigator.storage.getDirectory();
+      var dir = await root.getDirectoryHandle(opts.dirName || DEFAULT_DIR, { create: false });
+      var marker = await (await dir.getFileHandle(opts.cacheKey + '.ok')).getFile();
+      if (!markerMatches(await marker.text(), opts.buildId)) return null;
+      var file = await (await dir.getFileHandle(opts.cacheKey)).getFile();
+      if (!opts.expectedSize || file.size !== opts.expectedSize) return null;
+      var check = await verifyFile(file, opts.manifest, opts.verify || 'size');
+      if (!check.ok) return null;
+      if (opts.onLog) opts.onLog('cache hit: ' + opts.cacheKey + ' (read-only, ' + mb(file.size) + ' already on disk)');
+      return finish({ kind: 'opfs-cached', file: file, size: file.size,
+        url: URL.createObjectURL(wrapBlob(file, opts.cacheKey, opts.mime)), verify: check });
+    } catch (e) { return null; }
+  }
+
   async function ensureDataset(opts) {
+    if (!opts.writerFactory && !opts._writeLock && typeof navigator !== 'undefined' && navigator.locks) {
+      return navigator.locks.request('silksong-dataset:' + (opts.dirName || DEFAULT_DIR) + ':' + opts.cacheKey,
+        { signal: opts.signal }, function () { return ensureDataset(Object.assign({}, opts, { _writeLock: true })); });
+    }
     var log = makeLogger(opts.onLog);
     var dirName = opts.dirName || DEFAULT_DIR;
     var expectedSize = opts.expectedSize || 0;
@@ -1156,6 +1212,11 @@
     if (opts.segments && !opts.parts) opts.parts = opts.segments;
     var caps = opts.caps || (await detect());
     var sink = null;
+    if (!opts.writerFactory && opts.preferDisk !== false && caps.opfs) {
+      var cached = await getCachedDataset(opts);
+      if (cached) return cached;
+    }
+    if (opts.cacheOnly) return null;
 
     // An injected writerFactory is an explicit request to use disk (the test
     // suite and the desktop fallback both use it), so it wins over the
@@ -1211,6 +1272,7 @@
     await streamAll({
       parts: opts.parts,
       sink: memSink,
+      stallTimeoutMs: opts.stallTimeoutMs,
       startOffset: 0,
       concurrency: opts.concurrency,
       onProgress: opts.onProgress,
@@ -1233,6 +1295,7 @@
     });
   }
 
+  var workerProbes = new Map();
   async function openOpfsSink(opts, caps, dirName, expectedSize) {
     var base = {
       dirName: dirName,
@@ -1241,21 +1304,26 @@
       log: opts.onLog,
     };
     if (caps.workers && typeof Worker !== 'undefined' && opts.workerUrl) {
-      // Probe with a throw-away file so a partially downloaded cache is never
-      // touched, and so we know OPFS + sync access handles really work here.
-      var probeName = opts.cacheKey + '.probe';
-      var probe = new WorkerSink(
-        Object.assign({ workerUrl: opts.workerUrl, name: probeName, expectedSize: 0 }, base)
-      );
-      try {
-        await probe.open(false);
-        await probe.remove(probeName);
-        await probe.abort();
-        return new WorkerSink(Object.assign({ workerUrl: opts.workerUrl }, base));
-      } catch (e) {
-        probe.destroy();
-        opts.onLog && opts.onLog('writer worker unavailable: ' + ((e && e.message) || e));
-      }
+      // Probe once per page/directory/worker script, not twice per lazy part.
+      // Concurrent requests share the same capability test. The probe never
+      // opens the production file, even on a warm or interrupted download.
+      var probeKey = dirName + ':' + opts.workerUrl;
+      if (!workerProbes.has(probeKey)) workerProbes.set(probeKey, (async function () {
+        var probeName = opts.cacheKey + '.probe';
+        var probe = new WorkerSink(Object.assign({}, base, { workerUrl: opts.workerUrl, name: probeName, expectedSize: 0 }));
+        try {
+          await probe.open(false);
+          await probe.finish();
+          await probe.remove(probeName);
+          await probe.abort();
+          return true;
+        } catch (e) {
+          await quietAbort(probe);
+          opts.onLog && opts.onLog('writer worker unavailable: ' + ((e && e.message) || e));
+          return false;
+        }
+      })());
+      if (await workerProbes.get(probeKey)) return new WorkerSink(Object.assign({ workerUrl: opts.workerUrl }, base));
     }
     var root = await navigator.storage.getDirectory();
     var dir = await root.getDirectoryHandle(dirName, { create: true });
@@ -1280,7 +1348,7 @@
     if (typeof known !== 'number') known = -1;
 
     // `.ok`       = written after the whole file was verified  (complete)
-    // `.building` = written before the first byte of a download (partial)
+    // `.building` = durable coverage journal for complete parts (partial)
     var done = await safeCall(function () {
       return sink.getText(opts.cacheKey + '.ok');
     });
@@ -1288,16 +1356,25 @@
       return sink.getText(opts.cacheKey + '.building');
     });
 
-    var doneMatchesBuild = typeof done === 'string' && done.indexOf(opts.buildId) === 0;
-    var partialMatchesBuild = typeof building === 'string' && building.indexOf(opts.buildId) === 0;
-
+    var doneMatchesBuild = markerMatches(done, opts.buildId);
+    // File size is NOT coverage: later positional writes can leave earlier
+    // holes. Only journaled complete parts may be reused after interruption.
+    var position = 0;
+    var signature = JSON.stringify(opts.parts.map(function (p) {
+      var at = p.outOffset === undefined ? position : p.outOffset; position += p.bytes;
+      return [p.bytes, at, p.rangeStart, p.rangeEnd];
+    }));
+    var journal = null;
+    try { journal = JSON.parse(building); } catch (e) { /* unsafe legacy prefix: restart */ }
+    var partialMatchesBuild = journal && journal.schema === 2 && journal.buildId === opts.buildId &&
+      journal.signature === signature && Array.isArray(journal.completed) && journal.completed.length === opts.parts.length;
+    var endAt = 0;
+    var completed = opts.parts.map(function (p, i) {
+      var at = p.outOffset === undefined ? endAt : p.outOffset; endAt += p.bytes;
+      return !!(partialMatchesBuild && journal.completed[i] === true && known >= at + p.bytes);
+    });
     var cacheValid = expectedSize > 0 && known === expectedSize && doneMatchesBuild;
-
-    // A file of exactly the expected size can only exist if every byte was
-    // written (writes are issued strictly in order), so it is usable even when
-    // the tab died between the final write and the completion marker — but
-    // only if no *other* build left a marker behind.
-    var completeButUnmarked = expectedSize > 0 && known === expectedSize && done === null && !cacheValid;
+    var completeButUnmarked = expectedSize > 0 && known === expectedSize && partialMatchesBuild && completed.every(Boolean) && done === null;
     var staleBuild = done !== null && !doneMatchesBuild;
 
     if (cacheValid || completeButUnmarked) {
@@ -1342,23 +1419,23 @@
 
     if (staleBuild) log('cached data belongs to another build id — starting over');
 
-    var resumeAt = 0;
-    if (expectedSize > 0 && known > 0 && known < expectedSize && partialMatchesBuild && !staleBuild) {
-      resumeAt = known; // same build, partially written
-    }
-
-    if (!resumeAt) {
-      // Remember which build this partial file belongs to, so a killed session
-      // can be resumed instead of re-downloaded.
-      await safeCall(function () {
-        return sink.putText(opts.cacheKey + '.building', opts.buildId);
+    // Discard legacy, unjournaled partial files. A known byte length alone
+    // cannot prove even the first part exists in a concurrent download.
+    var resumeAt = partialMatchesBuild && !staleBuild && completed.some(Boolean) ? known : 0;
+    if (!resumeAt) completed.fill(false);
+    var checkpointQueue = Promise.resolve();
+    function checkpoint(index) {
+      checkpointQueue = checkpointQueue.then(async function () {
+        if (sink.flush) await sink.flush(); // data durable BEFORE metadata
+        completed[index] = true;
+        await sink.putText(opts.cacheKey + '.building', JSON.stringify({
+          schema: 2, buildId: opts.buildId, signature: signature, completed: completed,
+        }));
       });
-      if (staleBuild) {
-        await safeCall(function () {
-          return sink.remove(opts.cacheKey + '.ok');
-        });
-      }
+      return checkpointQueue;
     }
+    // Always remove an old completion marker before a fresh write.
+    if (!cacheValid) await safeCall(function () { return sink.remove(opts.cacheKey + '.ok'); });
 
     var opened;
     try {
@@ -1368,10 +1445,11 @@
       throw setup(describeOpenFailure(err, opts.cacheKey));
     }
 
-    var startOffset = opened.canResume ? opened.size : 0;
-    if (startOffset > 0) {
-      log('resuming download at ' + mb(startOffset));
-      if (opts.onStatus) opts.onStatus('resuming download — ' + mb(startOffset) + ' already saved');
+    var startOffset = 0; // sparse files resume by committed parts, never by size
+    if (!opened.canResume) completed.fill(false);
+    if (completed.some(Boolean)) {
+      log('resuming download at committed part boundaries (' + completed.filter(Boolean).length + ' parts)');
+      if (opts.onStatus) opts.onStatus('resuming verified completed parts');
     } else {
       if (opts.onStatus) opts.onStatus('downloading game data');
     }
@@ -1380,6 +1458,9 @@
       parts: opts.parts,
       sink: sink,
       startOffset: startOffset,
+      completedParts: completed,
+      onPartDone: sink.sequentialOnly ? null : checkpoint,
+      stallTimeoutMs: opts.stallTimeoutMs,
       concurrency: opts.concurrency,
       onProgress: opts.onProgress,
       fetchImpl: opts.fetchImpl,
@@ -1428,6 +1509,7 @@
       var stamp = opts.buildId;
       if (builtCheck.mode === 'sample' || builtCheck.mode === 'full') stamp += ' verified=' + builtCheck.mode;
       await sink.putText(opts.cacheKey + '.ok', stamp + ' ' + new Date().toISOString());
+      await sink.remove(opts.cacheKey + '.building');
     } catch (e) {
       log('could not write the cache marker: ' + ((e && e.message) || e));
     }
@@ -1514,7 +1596,18 @@
     DEFAULT_PART_BYTES: DEFAULT_PART_BYTES,
     detect: detect,
     requestPersistence: requestPersistence,
+    createDiskSink: async function (opts) {
+      return openOpfsSink(opts, await detect(), opts.dirName || DEFAULT_DIR, opts.expectedSize || 0);
+    },
     ensureDataset: ensureDataset,
+    getCachedDataset: getCachedDataset,
+    removeDataset: async function (key, dirName) {
+      var root = await navigator.storage.getDirectory();
+      var dir = await root.getDirectoryHandle(dirName || DEFAULT_DIR);
+      for (var name of [key + '.ok', key + '.building', key]) {
+        try { await dir.removeEntry(name); } catch (e) { /* already removed */ }
+      }
+    },
     verifyFile: verifyFile,
     sha256Hex: sha256Hex,
     partsFromManifest: partsFromManifest,

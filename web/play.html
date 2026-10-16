@@ -239,10 +239,12 @@
   <div id="logbox"></div>
 </div>
 
-<script src="js/stream.js"></script>
+<script src="js/stream.js?v=1.1.0"></script>
 <script src="js/manifest.js"></script>
 <script src="js/zip-plan.js"></script>
-<script src="js/community-build.js"></script>
+<script src="js/asset-cache.js?v=1.1.0"></script>
+<script src="js/community-build.js?v=1.1.0"></script>
+<script src="js/unity-startup.js?v=1.1.0"></script>
 <script src="js/zip.min.js"></script>
 <script src="js/save-codec.js"></script>
 <script src="js/boss-scenes.js"></script>
@@ -289,6 +291,20 @@
       buildMissingEl = $('buildMissing'), startBtn = $('startBtn'), bgWarn = $('bgwarn'), toastEl = $('toast'),
       panelEl = $('panel'), logBox = $('logbox'), fpsEl = $('fps'), memCapEl = $('memcap'), padEl = $('pad');
 
+  var loadStartedAt = 0, loadTimings = [];
+  function timing(stage) {
+    var elapsed = loadStartedAt ? Math.round(nowMs() - loadStartedAt) : 0;
+    loadTimings.push({ stage: stage, milliseconds: elapsed });
+    if (typeof performance.mark === 'function') performance.mark('silksong:' + stage);
+    log('load timing: ' + stage + ' at ' + elapsed + ' ms');
+  }
+  window.SKLoading = {
+    assetStats: function () { return COMMUNITY_ZIP_MOUNT && COMMUNITY_ZIP_MOUNT.stats ? Object.assign({}, COMMUNITY_ZIP_MOUNT.stats) : null; },
+    timings: function () { return loadTimings.slice(); },
+    // The engine-ready milestone is NOT necessarily controllable gameplay.
+    // A rebuilt game can call this from its first controllable scene.
+    markPlayable: function () { timing('first controllable gameplay'); },
+  };
   var logLines = [];
   function log() {
     var parts = [];
@@ -351,7 +367,7 @@
   async function resolveAssetBase() {
     if (!ASSET_BASE && FALLBACK_BASE) ASSET_BASE = FALLBACK_BASE;
     try {
-      var probe = await fetch(abs('Build/build-manifest.json'), { cache: 'no-store' });
+      var probe = await SKCommunityBuild.timedFetch(window.fetch.bind(window), 5000)(abs('Build/build-manifest.json'), { cache: 'no-store' });
       if (probe && probe.ok) {
         BUILD_SOURCE = 'prepared';
         return true;
@@ -363,7 +379,7 @@
 
     if (params.get('community') === '0' || typeof SKCommunityBuild === 'undefined') return false;
     try {
-      var response = await fetch('community-build.json', { cache: 'no-store' });
+      var response = await SKCommunityBuild.timedFetch(window.fetch.bind(window), 10000)(params.get('communityConfig') || 'community-build.json', { cache: 'no-store' });
       if (!response || !response.ok) return false;
       COMMUNITY_BUILD = SKCommunityBuild.validate(await response.json());
       // `base=` remains the override for a prepared build. The community
@@ -372,9 +388,13 @@
       ASSET_BASE = ASSET_BASE.replace(/\/?$/, '/');
       useRewriter = true;
       BUILD_SOURCE = 'community';
-      $('sub').textContent = 'First run downloads about ' + mb(COMMUNITY_BUILD.assetArchive.total) +
-        ' of game assets to this device’s storage — the cutscenes are left out, so it is usually ' +
-        'a good deal less. It is resumable; keep Safari open on Wi-Fi. Later runs reuse the cached archive.';
+      $('sub').textContent = 'Loads only the game bundles needed to start, then caches more as you play. ' +
+        'The complete game archive is ' + mb(COMMUNITY_BUILD.assetArchive.total) +
+        '; later runs reuse this device’s cache. Keep Safari open on Wi-Fi.';
+      if (typeof SKUnityStartup !== 'undefined') {
+        SKUnityStartup.preconnect(ASSET_BASE, document);
+        SKUnityStartup.preconnect(params.get('archiveBase') || COMMUNITY_BUILD.assetArchive.base || ASSET_BASE, document);
+      }
       log('using community WebGL source ' + COMMUNITY_BUILD.source + ' @ ' + COMMUNITY_BUILD.commit);
       return true;
     } catch (e) {
@@ -1666,6 +1686,7 @@
       rows.push(['free for us', caps.available ? mb(caps.available) : 'unknown']);
       rows.push(['secure context', caps.secure ? 'yes' : 'no']);
       rows.push(['web workers', caps.workers ? 'yes' : 'no']);
+      rows.push(['persistent storage', caps.persistent === undefined || caps.persistent === null ? 'unknown' : caps.persistent ? 'granted' : 'not granted (cache may be evicted)']);
     }
     var info = null;
     try { info = await SKStream.cacheInfo(); } catch (e) {}
@@ -2351,6 +2372,7 @@
     return new Promise(function (res, rej) {
       var s = document.createElement('script');
       s.src = url;
+      s.crossOrigin = 'anonymous';
       s.onload = function () { res(); };
       s.onerror = function () { rej(new Error('could not load ' + url)); };
       document.body.appendChild(s);
@@ -2410,19 +2432,26 @@
     };
   }
 
-  async function instantiateUnity(loaderUrl, config) {
+  async function instantiateUnity(loaderUrl, config, runtime) {
     setStatus('Starting the game…');
     currentStage = 'unity boot';
     markStage(currentStage);
     setProgress(0, '');
-    await loadScript(loaderUrl);
-    var instance = await window.createUnityInstance(canvas, config, function (progress) {
+    if (runtime) { runtime.configure(config); loaderUrl = runtime.loaderUrl; }
+    try { await loadScript(loaderUrl); }
+    catch (error) { if (runtime) runtime.dispose(); throw error; }
+    timing('Unity loader ready');
+    var boot = window.createUnityInstance(canvas, config, function (progress) {
       var pct = Math.round(progress * 100);
       setStatus('Loading into memory — ' + pct + '%');
       setProgress(progress, pct + '%');
       currentStage = 'unity memory ' + pct + '%';
       if (pct % 10 === 0) markStage(currentStage);
     });
+    var instance;
+    try { instance = await (runtime && runtime.failed ? Promise.race([boot, runtime.failed]) : boot); }
+    finally { if (runtime) runtime.dispose(); }
+    timing('Unity engine ready');
     unityInstance = instance;
     window.unityInstance = instance;
     return instance;
@@ -2430,6 +2459,8 @@
 
   function completeUnityBoot(instance, dataSet, wasmSet) {
     booted = true;
+    timing('loading overlay hidden');
+    log('startup summary: ' + JSON.stringify(loadTimings));
     bootedAt = nowMs();
     currentStage = 'running';
     clearStage();
@@ -2530,7 +2561,9 @@
           // A cached copy is checked with sampled digests (a few MB of hashing,
           // instant on iPad); "?verify=full" hashes the whole file instead.
           verify: params.get('verify') === 'full' ? 'full' : (spec.integrity ? 'sample' : 'size'),
-          workerUrl: 'js/writer.js',
+          workerUrl: 'js/writer.js?v=1.1.0',
+          fetchImpl: SKCommunityBuild.timedFetch(window.fetch.bind(window), 30000),
+          stallTimeoutMs: 45000,
           signal: controller ? controller.signal : undefined,
           onProgress: function (p) {
             lastProgress = Date.now();
@@ -2584,116 +2617,151 @@
   async function loadCommunityBuild() {
     var source = COMMUNITY_BUILD;
     if (!source) throw new Error('the community build source was not selected');
-    BUILD = {
-      kind: 'community',
-      buildId: source.buildId,
-      integrity: {},
-      datasets: {
-        data: { total: source.fileBytes.data },
-        wasm: { total: source.fileBytes.wasm },
-        assetArchive: { total: source.assetArchive.total },
-      },
-      unity: source.unity,
-    };
-    totalBytes = source.assetArchive.total;
-    // The archive is smaller than the published one once the cutscenes and
-    // the other platforms' bundles are left out; the exact figure is only
-    // known once the ZIP's own index has been read.
-    var archiveBytes = source.assetArchive.total;
-    setDataMb(totalBytes);
-    refreshPerfRows();
-    log('community build ' + source.buildId + ': asset archive ' + mb(totalBytes));
+    var startupController = new AbortController();
+    var startup = typeof SKUnityStartup !== 'undefined' ? SKUnityStartup.prepare(source, {
+      base: ASSET_BASE, fetchImpl: window.fetch.bind(window), document: document,
+      streaming: params.get('streaming') !== '0', onLog: log, signal: startupController.signal,
+    }) : Promise.resolve(null);
+    // Attach a handler immediately; indexing may fail before this is awaited.
+    startup.catch(function (error) { log('Unity preload failed: ' + error.message); });
+    try {
+      BUILD = {
+        kind: 'community',
+        buildId: source.buildId,
+        integrity: {},
+        datasets: {
+          data: { total: source.fileBytes.data },
+          wasm: { total: source.fileBytes.wasm },
+          assetArchive: { total: source.assetArchive.total },
+        },
+        unity: source.unity,
+      };
+      totalBytes = source.assetArchive.total;
+      // The archive is smaller than the published one once the cutscenes and
+      // the other platforms' bundles are left out; the exact figure is only
+      // known once the ZIP's own index has been read.
+      var archiveBytes = source.assetArchive.total;
+      setDataMb(totalBytes);
+      refreshPerfRows();
+      log('community build ' + source.buildId + ': asset archive ' + mb(totalBytes));
 
-    setStatus('Checking iPad storage…');
-    currentStage = 'community storage check';
-    markStage(currentStage);
-    caps = await SKStream.detect();
-    log('community storage', {
-      opfs: caps.opfs,
-      availableMB: Math.round((caps.available || 0) / 1048576),
-      quotaMB: Math.round((caps.quota || 0) / 1048576),
-      secure: caps.secure,
-    });
-    if (!caps.opfs) {
-      throw new Error('Safari private/on-device storage is unavailable. Open this page in a normal Safari tab (not Private Browsing) to cache the large game archive.');
+      setStatus('Checking iPad storage…');
+      currentStage = 'community storage check';
+      markStage(currentStage);
+      caps = await SKStream.detect();
+      log('community storage', {
+        opfs: caps.opfs,
+        availableMB: Math.round((caps.available || 0) / 1048576),
+        quotaMB: Math.round((caps.quota || 0) / 1048576),
+        secure: caps.secure,
+      });
+      if (!caps.opfs) {
+        throw new Error('Safari private/on-device storage is unavailable. Open this page in a normal Safari tab (not Private Browsing) to cache the large game archive.');
+      }
+      SKStream.requestPersistence().then(function (granted) { caps.persistent = granted; log('persistent storage: ' + granted); });
+
+      currentStage = 'download community assets';
+      markStage(currentStage);
+      setStatus('Downloading the game asset archive — keep Safari open on Wi-Fi');
+      var archiveMode = params.get('assets') === 'eager' || !source.assetArchive.slim ? 'eager' : 'lazy';
+      log('asset loading mode: ' + archiveMode);
+      var assetOptions = {
+        // The slimmer archive is published on its own (the build files stay on
+        // the community CDN), so the archive may name its root itself. A mirror
+        // can be forced with ?archiveBase=<url> — see web/COMMUNITY-BUILD.md.
+        base: params.get('archiveBase') || (source.assetArchive && source.assetArchive.base) || ASSET_BASE,
+        workerUrl: 'js/writer.js?v=1.1.0',
+        concurrency: Math.max(1, Math.min(Number(params.get('downloads')) || 6, 8)),
+        stallTimeoutMs: 45000,
+        bundleCacheBytes: Math.max(0, Math.min(params.has('bundleCacheMB') ? Number(params.get('bundleCacheMB')) || 0 : 512, 1024)) * 1048576,
+        bundleBase: params.get('bundleBase') || source.assetArchive.bundleBase || '',
+        stream: SKStream,
+        zip: window.zip,
+        // GitHub hands out a limited number of files an hour to a page that is
+        // not signed in, and the archive is 75 of them: a refusal in the middle
+        // of the download is a rate limit, and the loader waits it out instead
+        // of giving up. ?archiveWait=<minutes> says how long it may go on for
+        // (90 minutes by default: seven escalating pauses add up to 53 min, and
+        // an hour would stop a few minutes short of the window it waits for).
+        rateLimitBudgetMs: (function () {
+          var minutes = Number(params.get('archiveWait'));
+          return (isFinite(minutes) && minutes > 0 ? minutes : 90) * 60000;
+        })(),
+        onStatus: function (message) { setStatus('Game assets: ' + message); },
+        onPlan: function (plan) {
+          // The cutscenes (and any bundle for another platform) are left out of
+          // the archive, so both the download and the file on the device are
+          // smaller than the published one.
+          archiveBytes = plan.outputSize;
+          totalBytes = plan.downloadBytes;
+          setDataMb(totalBytes);
+          $('sub').textContent = 'First run downloads about ' + mb(plan.downloadBytes) +
+            ' of game assets — ' + mb(plan.skippedBytes) + ' of cutscenes are left out. ' +
+            'It is resumable; keep Safari open on Wi-Fi. Later runs reuse the cached archive.';
+          log('archive plan: ' + mb(plan.downloadBytes) + ' instead of ' + mb(source.assetArchive.total) +
+            ' (' + plan.skippedCount + ' of ' + plan.entryCount + ' files left out)');
+        },
+        onProgress: function (progress) {
+          if (archiveMode === 'lazy') {
+            if (!booted) {
+              setStatus('Loading requested game bundles — ' + progress.requestedParts + ' cached parts');
+              setProgress(null, mb(progress.networkBytes) + ' downloaded · ' + mb(progress.cacheBytes) + ' reused');
+            }
+            return;
+          }
+          var fraction = progress.total ? progress.loaded / progress.total : 0;
+          var eta = progress.bytesPerSecond > 0 ? ' · about ' + Math.max(1, Math.round(progress.etaSeconds / 60)) + ' min left' : '';
+          setStatus('Caching game assets on this iPad — part ' + progress.part + ' of ' + progress.parts);
+          setProgress(fraction, mb(progress.loaded) + ' / ' + mb(progress.total) + eta);
+          currentStage = 'community archive ' + Math.round(fraction * 100) + '%';
+          if (Math.round(fraction * 100) % 10 === 0) markStage(currentStage);
+        },
+        onLog: log,
+      };
+      var archiveSet = null;
+      if (archiveMode === 'lazy') {
+        COMMUNITY_ZIP_MOUNT = await SKCommunityBuild.openLazyArchive(source, assetOptions);
+        timing('lazy asset index ready');
+      } else {
+        archiveSet = await SKCommunityBuild.ensureArchive(source, assetOptions);
+        timing('full asset archive ready');
+      }
+      if (archiveMode === 'eager' && (!archiveSet || !archiveSet.file)) {
+        throw new Error('Safari could not read the asset archive back from local storage. Free up at least ' +
+          gb(archiveBytes * 1.05) + ' and try again.');
+      }
+
+      setStatus('Indexing the cached game assets…');
+      if (archiveMode === 'eager') COMMUNITY_ZIP_MOUNT = await SKCommunityBuild.openArchive(archiveSet.file, window.zip, { onLog: log });
+      log('indexed ' + COMMUNITY_ZIP_MOUNT.entryCount + ' files in the community asset ZIP');
+      SKCommunityBuild.installFetchMount(window, COMMUNITY_ZIP_MOUNT, {
+        onAsset: function (name) { log('asset from local ZIP: ' + name); },
+        // The cutscenes are answered with a placeholder container instead of
+        // the real (hundreds of megabytes) video, and the bytes are staged in
+        // Unity's own heap so the page does not keep a second copy.
+        onVideo: function (name, bytes) {
+          log('cutscene served as a ' + bytes + ' byte placeholder: ' + name);
+        },
+        // The cutscenes that were left out of the archive, including the ones
+        // whose names do not look like a video: they are answered with the
+        // placeholder too, so nothing asks for a file that is not there.
+        videoNames: archiveSet && archiveSet.plan ? archiveSet.plan.videoNames : [],
+        stageBytes: stageInWasmHeap,
+      });
+      try { if (archiveSet && archiveSet.dispose) archiveSet.dispose(); } catch (e) {}
+
+      var dataUrl = abs(source.unity.data);
+      var wasmUrl = abs(source.unity.wasm);
+      var frameworkUrl = abs(source.unity.framework);
+      var streamingAssetsUrl = abs(source.unity.streamingAssets);
+      var config = makeUnityConfig(dataUrl, wasmUrl, frameworkUrl, streamingAssetsUrl);
+      provideUpstreamBase(ASSET_BASE);
+      var instance = await instantiateUnity(abs(source.unity.loader), config, await startup);
+      completeUnityBoot(instance, null, null);
+    } finally {
+      startupController.abort();
+      startup.then(function (runtime) { if (runtime) runtime.dispose(); }).catch(function () {});
     }
-    SKStream.requestPersistence().then(function (granted) { log('persistent storage: ' + granted); });
-
-    currentStage = 'download community assets';
-    markStage(currentStage);
-    setStatus('Downloading the game asset archive — keep Safari open on Wi-Fi');
-    var archiveSet = await SKCommunityBuild.ensureArchive(source, {
-      // The slimmer archive is published on its own (the build files stay on
-      // the community CDN), so the archive may name its root itself. A mirror
-      // can be forced with ?archiveBase=<url> — see web/COMMUNITY-BUILD.md.
-      base: params.get('archiveBase') || (source.assetArchive && source.assetArchive.base) || ASSET_BASE,
-      workerUrl: 'js/writer.js',
-      // GitHub hands out a limited number of files an hour to a page that is
-      // not signed in, and the archive is 75 of them: a refusal in the middle
-      // of the download is a rate limit, and the loader waits it out instead
-      // of giving up. ?archiveWait=<minutes> says how long it may go on for
-      // (90 minutes by default: seven escalating pauses add up to 53 min, and
-      // an hour would stop a few minutes short of the window it waits for).
-      rateLimitBudgetMs: (function () {
-        var minutes = Number(params.get('archiveWait'));
-        return (isFinite(minutes) && minutes > 0 ? minutes : 60) * 60000;
-      })(),
-      onStatus: function (message) { setStatus('Game assets: ' + message); },
-      onPlan: function (plan) {
-        // The cutscenes (and any bundle for another platform) are left out of
-        // the archive, so both the download and the file on the device are
-        // smaller than the published one.
-        archiveBytes = plan.outputSize;
-        totalBytes = plan.downloadBytes;
-        setDataMb(totalBytes);
-        $('sub').textContent = 'First run downloads about ' + mb(plan.downloadBytes) +
-          ' of game assets — ' + mb(plan.skippedBytes) + ' of cutscenes are left out. ' +
-          'It is resumable; keep Safari open on Wi-Fi. Later runs reuse the cached archive.';
-        log('archive plan: ' + mb(plan.downloadBytes) + ' instead of ' + mb(source.assetArchive.total) +
-          ' (' + plan.skippedCount + ' of ' + plan.entryCount + ' files left out)');
-      },
-      onProgress: function (progress) {
-        var fraction = progress.total ? progress.loaded / progress.total : 0;
-        var eta = progress.bytesPerSecond > 0 ? ' · about ' + Math.max(1, Math.round(progress.etaSeconds / 60)) + ' min left' : '';
-        setStatus('Caching game assets on this iPad — part ' + progress.part + ' of ' + progress.parts);
-        setProgress(fraction, mb(progress.loaded) + ' / ' + mb(progress.total) + eta);
-        currentStage = 'community archive ' + Math.round(fraction * 100) + '%';
-        if (Math.round(fraction * 100) % 10 === 0) markStage(currentStage);
-      },
-      onLog: log,
-    });
-    if (!archiveSet || !archiveSet.file) {
-      throw new Error('Safari could not read the asset archive back from local storage. Free up at least ' +
-        gb(archiveBytes * 1.05) + ' and try again.');
-    }
-
-    setStatus('Indexing the cached game assets…');
-    COMMUNITY_ZIP_MOUNT = await SKCommunityBuild.openArchive(archiveSet.file, window.zip);
-    log('indexed ' + COMMUNITY_ZIP_MOUNT.entryCount + ' files in the community asset ZIP');
-    SKCommunityBuild.installFetchMount(window, COMMUNITY_ZIP_MOUNT, {
-      onAsset: function (name) { log('asset from local ZIP: ' + name); },
-      // The cutscenes are answered with a placeholder container instead of
-      // the real (hundreds of megabytes) video, and the bytes are staged in
-      // Unity's own heap so the page does not keep a second copy.
-      onVideo: function (name, bytes) {
-        log('cutscene served as a ' + bytes + ' byte placeholder: ' + name);
-      },
-      // The cutscenes that were left out of the archive, including the ones
-      // whose names do not look like a video: they are answered with the
-      // placeholder too, so nothing asks for a file that is not there.
-      videoNames: archiveSet.plan ? archiveSet.plan.videoNames : [],
-      stageBytes: stageInWasmHeap,
-    });
-    try { if (archiveSet.dispose) archiveSet.dispose(); } catch (e) {}
-
-    var dataUrl = abs(source.unity.data);
-    var wasmUrl = abs(source.unity.wasm);
-    var frameworkUrl = abs(source.unity.framework);
-    var streamingAssetsUrl = abs(source.unity.streamingAssets);
-    var config = makeUnityConfig(dataUrl, wasmUrl, frameworkUrl, streamingAssetsUrl);
-    provideUpstreamBase(ASSET_BASE);
-    var instance = await instantiateUnity(abs(source.unity.loader), config);
-    completeUnityBoot(instance, null, null);
   }
 
   async function loadAndBoot() {
@@ -2706,13 +2774,20 @@
       setStatus('Checking the game data…');
       currentStage = 'read manifest';
       markStage(currentStage);
-      BUILD = await SKManifest.load({ base: ASSET_BASE, log: log });
+      BUILD = await SKManifest.load({ base: ASSET_BASE, log: log, fetch: SKCommunityBuild.timedFetch(window.fetch.bind(window), 10000) });
       planFromManifest(BUILD);
       log('build ' + BUILD.buildId + ' (' + BUILD.kind + ')');
       refreshPerfRows();
 
-      if (params.get('check') !== '0') {
-        var report = await SKManifest.checkBuild(BUILD, { fetch: window.fetch.bind(window) });
+      var cachedSets = {};
+      await Promise.all(['data', 'wasm'].map(async function (key) {
+        if (!PLAN[key]) return;
+        cachedSets[key] = await SKStream.getCachedDataset({ cacheKey: PLAN[key].cacheKey,
+          buildId: BUILD.buildId, expectedSize: PLAN[key].total, manifest: PLAN[key].integrity,
+          verify: params.get('verify') === 'full' ? 'full' : (PLAN[key].integrity ? 'sample' : 'size'), mime: PLAN[key].mime });
+      }));
+      if (params.get('check') !== '0' && !(cachedSets.data && cachedSets.wasm)) {
+        var report = await SKManifest.checkBuild(BUILD, { fetch: SKCommunityBuild.timedFetch(window.fetch.bind(window), 15000) });
         log('data check: ' + (report.ok ? 'all chunks present' : 'PROBLEMS FOUND — see below'));
         Object.keys(report.datasets).forEach(function (key) {
           var r = report.datasets[key];
@@ -2744,7 +2819,7 @@
         opfs: caps.opfs, quotaMB: Math.round(caps.quota / 1048576), usedMB: Math.round(caps.usage / 1048576),
         secure: caps.secure, workers: caps.workers, opfsError: caps.opfsError || undefined, ua: navigator.userAgent,
       });
-      SKStream.requestPersistence().then(function (granted) { log('persistent storage: ' + granted); });
+      SKStream.requestPersistence().then(function (granted) { caps.persistent = granted; log('persistent storage: ' + granted); });
 
       if (caps.quota && caps.available && caps.available < totalBytes * 1.05) {
         log('warning: only ' + mb(caps.available) + ' of quota free — the cache may not fit');
@@ -2753,7 +2828,16 @@
       /* --- 2. the data chunks (the big ones) --- */
       currentStage = 'prepare data';
       markStage(currentStage);
-      var dataSet = await loadDatasetWithRetry(PLAN.data, onLoadProgress, 'game data');
+      var sets = await Promise.allSettled([
+        cachedSets.data || loadDatasetWithRetry(PLAN.data, onLoadProgress, 'game data'),
+        cachedSets.wasm || loadDatasetWithRetry(PLAN.wasm, null, 'game engine'),
+      ]);
+      if (sets.some(function (item) { return item.status === 'rejected'; })) {
+        sets.forEach(function (item) { if (item.status === 'fulfilled' && item.value) item.value.dispose(); });
+        throw sets.find(function (item) { return item.status === 'rejected'; }).reason;
+      }
+      var dataSet = sets[0].value;
+      var wasmSet = sets[1].value;
       log('data ready via ' + dataSet.kind + ': ' + mb(dataSet.size));
       if (dataSet.kind === 'memory') {
         // No OPFS (private window, very old Safari, storage blocked): the data
@@ -2769,14 +2853,6 @@
       /* --- 3. the wasm module --- */
       currentStage = 'prepare wasm';
       markStage(currentStage);
-      var wasmSet = await loadDatasetWithRetry(
-        PLAN.wasm,
-        function (p) {
-          var frac = p.total ? p.loaded / p.total : 0;
-          setProgress(frac, mb(p.loaded) + ' / ' + mb(p.total));
-        },
-        'game engine'
-      );
       log('wasm ready via ' + wasmSet.kind + ': ' + mb(wasmSet.size));
 
       /* --- 4. Unity --- */
@@ -2791,6 +2867,13 @@
       /* --- 5. done --- */
       completeUnityBoot(instance, dataSet, wasmSet);
     } catch (err) {
+      [dataSet, wasmSet, cachedSets && cachedSets.data, cachedSets && cachedSets.wasm].forEach(function (set) {
+        try { if (set && set.dispose) set.dispose(); } catch (e) {}
+      });
+      if (COMMUNITY_ZIP_MOUNT) {
+        Promise.resolve(COMMUNITY_ZIP_MOUNT.close()).catch(function () {});
+        COMMUNITY_ZIP_MOUNT = null;
+      }
       releaseAwake();
       var message = (err && err.message) || String(err);
       if (err && err.name === 'AbortError') message = 'Cancelled';
@@ -2819,6 +2902,8 @@
   }
 
   async function start() {
+    loadStartedAt = nowMs(); loadTimings = [];
+    timing('Start pressed');
     startBtn.classList.add('hidden');
     errEl.classList.add('hidden');
     subEl.classList.add('hidden');

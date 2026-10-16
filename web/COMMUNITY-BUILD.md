@@ -13,6 +13,14 @@ at commit `bcbe014765f2f6ca4b1d82ac25755a0299a600ab`. The related
 fork in the same project lineage. This source was selected at the repository
 maintainer's request, with their stated permission to reuse it.
 
+## Optimized startup (current default)
+
+The player now downloads only ZIP parts needed by requested bundles, with a
+bounded extracted-bundle cache and native Wasm compilation overlapping asset
+setup. Existing complete archives are reused. `?assets=eager` retains the old
+full-download path. See [LOADING-OPTIMIZATIONS.md](LOADING-OPTIMIZATIONS.md) for
+implementation, tests, alternate hosting, direct bundles and controls.
+
 ## What the page loads
 
 - Unity loader, framework, data, and wasm files are fetched from the pinned
@@ -23,18 +31,14 @@ maintainer's request, with their stated permission to reuse it.
   this repository, published under the `slim-assets` tag and served by
   `raw.githubusercontent.com`, with jsDelivr recorded as a mirror (see [Two
   hosts for the archive parts](#two-hosts-for-the-archive-parts)). The player
-  streams those pieces to Safari's Origin Private File System
-  (OPFS), where downloads can resume after an interruption. Six parts are on
-  the wire at a time — one part at a time means dozens of round trips, which is
-  minutes of waiting on a phone — and each part is written to disk at its own
-  offset as it arrives, so the queue costs a few chunks of RAM rather than a
-  few parts.
-- **There is nothing left to leave out of it**, so the player skips the
-  planning step entirely (`assetArchive.slim`). The same code path still
-  prunes the upstream archive for anyone who points the descriptor back at it —
-  see [The smaller archive](#the-smaller-archive) below.
-- `zip.js` reads the archive from OPFS and extracts only the bundle Unity asks
-  for; the page does not concatenate the ZIP or unpack all bundles in RAM.
+  downloads only pieces touched by ZIP metadata/requested bundles into OPFS.
+  Up to six requested parts download at a time (configurable 1–8), streamed to
+  disk with bounded write buffers. Completed pieces survive reloads.
+- The archive is already slim (`assetArchive.slim`), so the historical pruning
+  step below is skipped. This does not mean every remaining bundle is needed
+  before the first scene; lazy loading prioritizes only requested content.
+- `zip.js` extracts requested bundles, verifies their CRC, and caches extracted
+  output within a quota-aware budget. The ZIP is never concatenated in RAM.
 - A cutscene request is answered with a ~600-byte blank container (the same
   one `prepare-build.mjs` writes into a prepared build) instead of the real
   video. The upstream archive still holds the high-definition cutscenes, and
@@ -46,7 +50,7 @@ roughly 1.3 GiB of free storage. Leave the tab in the foreground. GitHub rate
 limits unauthenticated downloads, so a download can be made to pause part-way
 through — the player waits it out and carries on rather than stopping; see
 [A 403 in the middle of the download](#a-403-in-the-middle-of-the-download).
-Later runs reuse the cached archive. If OPFS or the available quota is
+Later runs reuse cached parts/extracted bundles (or an existing complete archive). If OPFS or the available quota is
 insufficient, the player will explain that rather than trying to put a
 multi-gigabyte ZIP in RAM.
 

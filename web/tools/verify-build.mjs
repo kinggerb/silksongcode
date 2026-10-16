@@ -237,7 +237,7 @@ export async function verifyBuild(outDir, opts = {}) {
 
   /* ---- the page itself (lives next to this tool, not in the build output) ---- */
   const pageDir = opts.pageDir || WEB_ROOT;
-  for (const rel of ['play.html', 'index.html', 'community-build.json', 'js/stream.js', 'js/writer.js', 'js/manifest.js', 'js/community-build.js', 'js/zip.min.js', 'js/save-codec.js', 'js/boss-scenes.js']) {
+  for (const rel of ['play.html', 'index.html', 'community-build.json', 'js/stream.js', 'js/writer.js', 'js/manifest.js', 'js/community-build.js', 'js/asset-cache.js', 'js/unity-startup.js', 'js/zip.min.js', 'js/save-codec.js', 'js/boss-scenes.js']) {
     try {
       const stat = await fsp.stat(path.join(pageDir, ...rel.split('/')));
       report.page[rel] = stat.size;

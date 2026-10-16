@@ -49,6 +49,8 @@ const MIME = {
 
 function contentType(file) {
   const ext = path.extname(file).toLowerCase();
+  if (/\.wasm(?:\.unityweb|\.gz|\.br)$/.test(file)) return MIME['.wasm'];
+  if (/\.js(?:\.unityweb|\.gz|\.br)$/.test(file)) return MIME['.js'];
   if (MIME[ext]) return MIME[ext];
   if (/\.(data|wasm)\.part\d+$/.test(file)) return MIME['.' + /\.(data|wasm)\./.exec(file)[1]];
   return 'application/octet-stream';
@@ -63,12 +65,13 @@ function human(n) {
 const server = http.createServer(async (req, res) => {
   const started = Date.now();
   try {
+    if (req.method !== 'GET' && req.method !== 'HEAD') { res.writeHead(405, { allow: 'GET, HEAD' }).end(); return; }
     const url = new URL(req.url, 'http://' + (req.headers.host || 'localhost'));
     let rel = decodeURIComponent(url.pathname);
     if (rel.endsWith('/')) rel += 'index.html';
 
     const file = path.join(root, path.normalize(rel).replace(/^(\.\.[/\\])+/, ''));
-    if (!file.startsWith(root)) {
+    if (file !== root && !file.startsWith(root + path.sep)) {
       res.writeHead(403).end('forbidden');
       return;
     }
@@ -86,14 +89,37 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    // Only explicitly versioned assets are immutable. HTML and mutable JS/
+    // descriptors always revalidate, so deploying a fix cannot strand clients.
+    const asset = /\.(?:bundle|wasm|data|unityweb|part\d+|gz|br)$/.test(file);
+    const immutable = asset && (process.env.IMMUTABLE_ASSETS === '1' || /[a-f0-9]{16,}/i.test(rel) || /^[a-f0-9]{12,}$/i.test(url.searchParams.get('v') || ''));
+    const etag = '"' + stat.size.toString(16) + '-' + Math.trunc(stat.mtimeMs).toString(16) + '"';
     const headers = {
       'content-type': contentType(file),
       'accept-ranges': 'bytes',
-      'cache-control': 'no-store',
-      'cross-origin-resource-policy': 'same-origin',
+      'cache-control': immutable ? 'public, max-age=31536000, immutable' : 'no-cache',
+      'etag': etag,
+      'last-modified': stat.mtime.toUTCString(),
+      'cross-origin-resource-policy': file.endsWith('.html') ? 'same-origin' : 'cross-origin',
+      'access-control-allow-origin': '*',
+      'access-control-expose-headers': 'Content-Length, Content-Range, Content-Encoding, Accept-Ranges, ETag',
+      'timing-allow-origin': '*',
     };
 
-    const range = req.headers.range;
+    // Let the browser decode Unity's precompressed files natively. Never add
+    // a coding blindly: verify the gzip signature, and ignore Range for coded
+    // files because a fragment of a gzip stream cannot be decoded alone.
+    let encoded = false;
+    if (/\.(unityweb|gz)$/.test(file)) {
+      const handle = await fsp.open(file, 'r');
+      try {
+        const magic = Buffer.alloc(2); await handle.read(magic, 0, 2, 0);
+        if (magic[0] === 31 && magic[1] === 139) { headers['content-encoding'] = 'gzip'; encoded = true; }
+      } finally { await handle.close(); }
+    } else if (file.endsWith('.br')) { headers['content-encoding'] = 'br'; encoded = true; }
+    if (encoded) headers['accept-ranges'] = 'none';
+    if (!req.headers.range && req.headers['if-none-match'] === etag) { res.writeHead(304, headers).end(); return; }
+    const range = encoded ? null : req.headers.range;
     let start = 0;
     let end = stat.size - 1;
     if (range) {
@@ -105,10 +131,12 @@ const server = http.createServer(async (req, res) => {
           start = Number(m[1] || 0);
           end = m[2] === '' ? stat.size - 1 : Number(m[2]);
         }
-        if (Number.isNaN(start) || Number.isNaN(end) || start > end || start >= stat.size) {
+        end = Math.min(end, stat.size - 1);
+        if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || start > end || start >= stat.size) {
           res.writeHead(416, { 'content-range': 'bytes */' + stat.size }).end();
           return;
         }
+        headers['content-length'] = String(end - start + 1);
         headers['content-range'] = 'bytes ' + start + '-' + end + '/' + stat.size;
         res.writeHead(206, headers);
       } else {
@@ -121,7 +149,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     const length = end - start + 1;
-    if (req.method === 'HEAD') {
+    if (req.method === 'HEAD' || stat.size === 0) {
       res.end();
     } else {
       await new Promise((resolve) => {
@@ -141,7 +169,8 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(port, host, () => {
+  const boundPort = server.address().port;
   console.log('Silksong web port served from ' + root);
-  console.log('  local:   http://127.0.0.1:' + port + '/play.html');
+  console.log('  local:   http://127.0.0.1:' + boundPort + '/play.html');
   console.log('  network: http://<this machine ip>:' + port + '/play.html   ← open this on the iPad');
 });
