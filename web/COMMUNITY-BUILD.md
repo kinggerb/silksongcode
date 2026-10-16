@@ -20,9 +20,17 @@ maintainer's request, with their stated permission to reuse it.
 - The Addressables ZIP is split into 100 files totalling exactly
   `2,083,139,638` bytes (about `1.94 GiB`). The player streams those pieces to
   Safari's Origin Private File System (OPFS), where downloads can resume after
-  an interruption.
+  an interruption. Four parts are on the wire at a time — one part at a time
+  means a hundred round trips, which is minutes of waiting on a phone — and
+  each part is written to disk at its own offset as it arrives, so the queue
+  costs a few chunks of RAM rather than a few parts.
 - `zip.js` reads the archive from OPFS and extracts only the bundle Unity asks
   for; the page does not concatenate the ZIP or unpack all bundles in RAM.
+- A cutscene request is answered with a ~600-byte blank container (the same
+  one `prepare-build.mjs` writes into a prepared build) instead of the real
+  video. The upstream archive still holds the high-definition cutscenes, and
+  inflating one of those into a Blob is more memory than a phone tab has to
+  spare. The cutscene plays as a black frame.
 
 The first run therefore needs Wi-Fi, a normal (non-Private) Safari tab, and
 roughly 2 GiB of free storage. Leave the tab in the foreground. Later runs reuse

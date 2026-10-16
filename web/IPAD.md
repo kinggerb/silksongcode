@@ -36,15 +36,17 @@ The Hollow Knight port hit precisely this wall at 926 MB.
 
 | Step | How | Effect |
 | --- | --- | --- |
-| Download | every chunk is streamed straight into the **Origin Private File System** through a worker (`FileSystemSyncAccessHandle`) | peak RAM during download: a few MB, not GB. `js/writer.js` |
+| Download | every chunk is streamed straight into the **Origin Private File System** through a worker (`FileSystemSyncAccessHandle`), four chunks in flight at a time | peak RAM during download: a few MB, not GB. `js/writer.js`, `js/stream.js` |
 | Second visit | prepared files and the community Addressables archive stay in OPFS, keyed by build id | completed data is reused; interrupted downloads resume |
 | Addressables | the community ZIP is indexed from its OPFS `File`; `zip.js` extracts only requested bundles | no 2 GB `ArrayBuffer`, and no eager unpack of every bundle |
+| Cutscenes | a cutscene request is answered with a ~600-byte blank container instead of the real video (`js/community-build.js`) | a high-definition cutscene never has to fit in RAM |
 | Hand-off | a prepared build gives Unity one file-backed blob URL; the community build uses Unity's compressed CDN entry points | avoids concatenating multi-gigabyte assets in page memory |
 | Verification | prepared builds probe chunk sizes and sample digests; the community source uses pinned commit IDs, exact ZIP-part sizes and a ZIP directory check | stale or truncated files fail before Unity uses them |
 | Data | prepared builds can replace cutscenes with ~600-byte black placeholders and omit junk (`prepare-build.mjs`) | reduces the prepared build's download and storage footprint |
-| Memory | render-scale ladder (100 % → 25 %), frame cap, auto-degrade, a hard heap cap that reloads, and a crash ladder that starts the next session lower | the tab stays under the ceiling instead of being killed |
+| Memory | a 1 GB wasm heap ceiling, a 16 MB starting heap, a render-scale ladder (100 % → 25 %), a frame cap, auto-degrade and a crash ladder | the tab stays under the ceiling instead of being killed |
+| Memory | the collector runs every minute, and four times a minute once the heap passes 900 MB | the heap never creeps towards the ceiling |
 | Audio | a guard relabels iOS's `NotSupportedError` on `play()` as `NotAllowedError`, which is the error Unity waits out | sound starting late no longer kills the game |
-| Room audio | the framework's `disconnectSource` drops the `<audio>` source (`tools/patches.mjs`) | WebKit frees each room's music decoder |
+| Room audio | the framework's `disconnectSource` drops the `<audio>` source (`tools/patches.mjs`), and the page sweeps the elements nobody is using | WebKit frees each room's music decoder |
 
 Measured on the Hollow Knight port, the same changes took the peak during load
 from ~3.7 GB to one copy of the data (~930 MB → 659 MB after the cutscene
@@ -82,9 +84,10 @@ and Unity's stream compilation.
 * **Later runs** — the large community ZIP is reused from OPFS. Prepared-build
   chunks use sampled digest verification; community ZIP parts use exact sizes
   and a pinned source commit.
-* **Graphics** — iPads start at **Balanced** (85 % render scale, 60 fps cap).
-  Menu ▸ Graphics & performance has seven levels down to **Rock bottom**
-  (25 % scale, 24 fps).
+* **Graphics** — iPads and phones start at **Low** (55 % render scale, 30 fps
+  cap), because the canvas backing store is the first thing that kills a
+  mobile tab. Menu ▸ Graphics & performance has seven levels, from **High**
+  down to **Rock bottom** (25 % scale, 24 fps).
 * **Storage** — the cache lives in the origin's private file system; *Menu ▸
   Clear cached game data* deletes it.
 * **Crashes** — a killed tab leaves a heartbeat behind, so the next visit shows
@@ -104,7 +107,15 @@ and Unity's stream compilation.
 
 A lower render scale shrinks the canvas backing store; CSS stretches it back
 over the screen, so the picture gets softer while GPU work, video memory and
-heat all drop. One-off overrides are useful for finding a device's limit:
+heat all drop.
+
+A phone or a tablet **starts at Low** (55 % render, 30 fps): the canvas backing
+store is the first thing that kills a mobile tab, and Safari keeps a copy of
+the drawing buffer for compositing. A desktop starts at High. It is a default,
+not a cage — *Menu ▸ Graphics* walks the ladder in both directions, and the
+auto-degrade and crash ladders still work on top of it.
+
+One-off overrides are useful for finding a device's limit:
 
 ```
 play.html?preset=low      play.html?fps=30      play.html?scale=0.5
@@ -121,6 +132,28 @@ The page also caps the frame rate by wrapping `requestAnimationFrame` — on a
 120 Hz iPad an uncapped game draws twice the frames for no visible gain — and
 auto-degrades one level if the frame rate stays under 80 % of the cap for three
 seconds.
+
+### The memory budget
+
+Three numbers decide whether the tab survives the session:
+
+| What | Value | Why |
+| --- | --- | --- |
+| `maximumHeapSize` | 1 GB | the wasm heap is the biggest thing in the tab. The old 1.4 GB let Unity grow into the range where Safari's jetsam killer takes the whole WebContent process down without a chance to draw anything. |
+| `INITIAL_MEMORY` | 16 MB | Emscripten grows the heap in big steps; a small start means the unused first half of the old one is not resident while the game boots. |
+| `webglContextAttributes` | `preserveDrawingBuffer: false`, `desynchronized: true`, `powerPreference: 'low-power'` on a phone | no copy of the drawing buffer is kept for compositing, late frames are dropped instead of queued, and the phone's GPU is not asked for the high-performance path. |
+
+The page **never reloads the tab on its own**. There used to be a hard heap
+cap with a countdown that reloaded the game; on iPadOS that threw the session
+away, re-ran the whole boot and usually lost the race with the system kill
+anyway. The ceiling now lives in the numbers above, and the page only *warns*
+about memory.
+
+Once the heap passes 900 MB the collector runs four times a minute instead of
+once, and it is asked for a full collection: the IL2CPP collector twice in a
+row (the first pass only marks, the second frees), `UnloadUnusedAssets`, and
+the one allocation the page owns in Unity's heap released through
+`Module._free`.
 
 ## 6. Touch controls
 

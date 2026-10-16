@@ -55,6 +55,8 @@ const PATCHED_MEDIA_BLOCK =
   'if(this.source.playTimeout){clearTimeout(this.source.playTimeout);this.source.playTimeout=null}' +
   'var pending=WEBAudio.pendingAudioSources[this.source.mediaElement.src];' +
   'if(pending&&pending.sourceNode===this.source){delete WEBAudio.pendingAudioSources[this.source.mediaElement.src]}' +
+  'try{this.source.mediaElement.pause()}catch(e){}' +
+  'try{this.source.mediaElement.removeAttribute("src")}catch(e){}' +
   'this.source.mediaElement.src="";try{this.source.mediaElement.load()}catch(e){}}';
 
 function replaceOnce(source, find, replace) {

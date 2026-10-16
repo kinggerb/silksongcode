@@ -53,6 +53,12 @@ function bootPage({ fetchImpl, touch = true, userAgent } = {}) {
   if (touch) {
     Object.defineProperty(win.navigator, 'maxTouchPoints', { value: 5, configurable: true });
   }
+  // jsdom ignores the `userAgent` option, so it has to be set by hand: the
+  // page decides what a phone is by looking at the user agent.
+  Object.defineProperty(win.navigator, 'userAgent', {
+    value: userAgent || (touch ? 'Mozilla/5.0 (iPad; CPU OS 18_0 like Mac OS X) AppleWebKit/605.1.15' : 'Mozilla/5.0 (Macintosh)'),
+    configurable: true,
+  });
   // The page talks to the network through fetch and to the screen through
   // matchMedia; both get quiet stubs here.
   win.fetch = fetchImpl || (async () => ({ ok: false, status: 404, headers: new Map(), text: async () => '' }));
@@ -122,9 +128,9 @@ await test('it initialises without throwing and exposes its diagnostics', () => 
   eq(perf.presets()[0], 'high', 'the first is High');
   eq(perf.presets()[6], 'rock_bottom', 'the last is Rock bottom');
   const settings = perf.settings();
-  eq(settings.activeIndex, 1, 'a touch device starts at Balanced');
-  eq(settings.scale, 0.85, 'and at 85 % render scale');
-  eq(settings.fps, 60, 'with a 60 fps cap');
+  eq(settings.activeIndex, 3, 'a touch device starts at Low');
+  eq(settings.scale, 0.55, 'and at 55 % render scale');
+  eq(settings.fps, 30, 'with a 30 fps cap');
   ok(settings.frameInterval > 0, 'the frame limiter computed an interval');
   win.close();
 });
@@ -135,6 +141,98 @@ await test('the save codec, loader and manifest modules really loaded', () => {
   ok(win.SKManifest && win.SKManifest.DEFAULT_PATH, 'manifest');
   ok(win.SKSaveCodec && win.SKSaveCodec.encodeDat, 'save codec');
   ok(win.SKBossScenes && win.SKBossScenes.list, 'boss scenes');
+  win.close();
+});
+
+section('the memory ceiling');
+
+await test('the wasm heap is capped below the zone where iPadOS kills the tab', () => {
+  const win = bootPage();
+  const config = win.SKPerf.internals().makeUnityConfig('data', 'code', 'framework', 'assets');
+  eq(config.maximumHeapSize, 1073741824, 'the heap may not grow past 1 GB');
+  ok(config.maximumHeapSize < 1468006400, 'which is below the old 1.4 GB');
+  eq(config.INITIAL_MEMORY, 16777216, 'and the heap starts at 16 MB, not 32');
+  ok(config.INITIAL_MEMORY < 33554432, 'so no RAM is front-loaded');
+  win.close();
+});
+
+await test('the WebGL context is configured for a phone, not for a workstation', () => {
+  const win = bootPage();
+  const attributes = win.SKPerf.internals().makeUnityConfig('d', 'c', 'f', 'a').webglContextAttributes;
+  eq(attributes.preserveDrawingBuffer, false, 'the drawing buffer is not kept around');
+  eq(attributes.desynchronized, true, 'late frames are dropped instead of queued');
+  eq(attributes.powerPreference, 'low-power', 'a touch device asks for the low-power GPU');
+  eq(attributes.antialias, false, 'no multisampling');
+  win.close();
+
+  const desktop = bootPage({ touch: false, userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)' });
+  eq(
+    desktop.SKPerf.internals().makeUnityConfig('d', 'c', 'f', 'a').webglContextAttributes.powerPreference,
+    'high-performance',
+    'a desktop keeps the fast GPU'
+  );
+  desktop.close();
+});
+
+await test('the loader never reloads the tab on its own', () => {
+  const win = bootPage();
+  eq(win.SKPerf.HARD_MEMORY_CAP_MB, Infinity, 'there is no hard memory cap');
+  // The countdown that used to reload the tab is gone: the function that
+  // armed it does nothing but write a line to the log.
+  const source = win.document.querySelector('script:not([src])');
+  ok(source, 'the page script is there');
+  win.close();
+});
+
+await test('the collector runs more often once the heap gets big', () => {
+  const win = bootPage();
+  const internals = win.SKPerf.internals();
+  // A fake Unity module: heapMB() only asks how big the memory is.
+  const withHeap = (mb) => {
+    win.unityInstance = { Module: { wasmMemory: { buffer: { byteLength: mb * 1048576 } } } };
+  };
+  withHeap(500);
+  eq(internals.isMemoryPressure(), false, '500 MB is not pressure');
+  eq(internals.gcIntervalTicks(), 60, 'so the collector runs once a minute');
+  withHeap(950);
+  eq(internals.isMemoryPressure(), true, '950 MB is pressure');
+  eq(internals.gcIntervalTicks(), 15, 'so the collector runs four times a minute');
+  win.close();
+});
+
+section('the default graphics level');
+
+await test('a phone starts low, a desktop starts high', () => {
+  const ipad = bootPage({ touch: true });
+  eq(ipad.SKPerf.internals().defaultPresetIndex(), 3, 'an iPad starts at Low');
+  ipad.close();
+
+  // A mobile browser that reports no touch points at all (iPadOS in
+  // "Request Desktop Website" mode, an Android tablet with a mouse).
+  const mobile = bootPage({
+    touch: false,
+    userAgent: 'Mozilla/5.0 (Linux; U; Mobile; en) AppleWebKit/537.36 (KHTML, like Gecko) Version/17.0 Safari/604.1',
+  });
+  eq(mobile.SKPerf.internals().defaultPresetIndex(), 3, 'a phone browser starts at Low');
+  eq(mobile.SKPerf.internals().isSmallDevice(), true, 'and is treated as a small device');
+  mobile.close();
+
+  const desktop = bootPage({ touch: false, userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)' });
+  eq(desktop.SKPerf.internals().defaultPresetIndex(), 0, 'a desktop starts at High');
+  eq(desktop.SKPerf.internals().isSmallDevice(), false, 'and is not a small device');
+  desktop.close();
+});
+
+await test('the default level is a default, not a cage', () => {
+  const win = bootPage();
+  // The player can still raise it: the ladder is not locked.
+  const button = win.document.getElementById('perfBtn');
+  button.click(); // Low → Potato
+  button.click(); // → Minimum
+  button.click(); // → Rock bottom
+  button.click(); // → back around to High
+  eq(win.SKPerf.settings().activeIndex, 0, 'the ladder can be walked back up to High');
+  eq(win.SKPerf.settings().scale, 1, 'and the render scale follows');
   win.close();
 });
 
@@ -277,23 +375,23 @@ await test('the canvas shrinks with the render scale and is stretched back with 
   const internals = win.SKPerf.internals();
   internals.applyResolution();
   const canvas = win.document.getElementById('unity-canvas');
-  eq(canvas.width, Math.round(1024 * 0.85), 'backing store is 85 % wide');
-  eq(canvas.height, Math.round(768 * 0.85), 'and 85 % tall');
-  ok(/scale\(1\.1765\)/.test(canvas.style.transform), 'CSS scales it back up: ' + canvas.style.transform);
+  eq(canvas.width, Math.round(1024 * 0.55), 'backing store is 55 % wide');
+  eq(canvas.height, Math.round(768 * 0.55), 'and 55 % tall');
+  ok(/scale\(1\.8182\)/.test(canvas.style.transform), 'CSS scales it back up: ' + canvas.style.transform);
   win.close();
 });
 
 await test('picking a graphics level changes scale, cap and the stored preference', () => {
   const win = bootPage();
   const button = win.document.getElementById('perfBtn');
-  button.click(); // Balanced → Smooth
+  button.click(); // Low → Potato
   const settings = win.SKPerf.settings();
-  eq(settings.activeIndex, 2, 'one step down the ladder');
-  eq(settings.scale, 0.7, 'render scale followed');
-  eq(settings.fps, 45, 'frame cap followed');
-  ok(/Smooth/.test(button.textContent), 'the button says so: ' + button.textContent);
+  eq(settings.activeIndex, 4, 'one step down the ladder');
+  eq(settings.scale, 0.4, 'render scale followed');
+  eq(settings.fps, 30, 'frame cap followed');
+  ok(/Potato/.test(button.textContent), 'the button says so: ' + button.textContent);
   const stored = JSON.parse(win.localStorage.getItem('sk.perf'));
-  eq(stored.preset, 2, 'and it is remembered for the next visit');
+  eq(stored.preset, 4, 'and it is remembered for the next visit');
   win.close();
 });
 
@@ -338,7 +436,7 @@ await test('a crash ladder lowers the starting level on the next visit', () => {
   const internals = win.SKPerf.internals();
   internals.resetStores();
   const clean = win.SKPerf.settings();
-  eq(clean.activeIndex, 1, 'a clean exit starts at Balanced on an iPad');
+  eq(clean.activeIndex, 3, 'a clean exit starts at Low on an iPad');
 
   // A session that booted, then vanished while it was on screen with a 1.1 GB
   // heap: exactly what iPadOS leaves behind when it kills a tab.
@@ -353,13 +451,13 @@ await test('a crash ladder lowers the starting level on the next visit', () => {
   internals.evaluateLastSession();
   const afterOne = win.SKPerf.settings();
   eq(afterOne.crashSteps, 1, 'the ladder noticed the crash');
-  eq(afterOne.activeIndex, 2, 'so the next session starts one step lower');
+  eq(afterOne.activeIndex, 4, 'so the next session starts one step lower');
 
   win.localStorage.setItem('sk.heartbeat', heartbeat);
   internals.evaluateLastSession();
   const afterTwo = win.SKPerf.settings();
   eq(afterTwo.crashSteps, 2, 'a second crash climbs again');
-  eq(afterTwo.activeIndex, 3, 'and the level drops further');
+  eq(afterTwo.activeIndex, 5, 'and the level drops further');
   eq(win.SKPerf.lastSession().crashed, true, 'the panel can say what happened');
 
   // A tab killed in the background says nothing about the graphics level.
@@ -395,7 +493,7 @@ await test('the manifest fills in the chunk list, totals and the start-screen te
   win2.SKPerf.internals().planFromManifest(win2.SKManifest.normalize(loaded, ''));
   const text = win2.document.getElementById('sub').textContent;
   ok(/\d+\.\d MB/.test(text) && /32 data chunks/.test(text), 'the start screen names the download: ' + text);
-  eq(win2.SKPerf.settings().scale, 0.85, 'and the graphics default did not change');
+  eq(win2.SKPerf.settings().scale, 0.55, 'and the graphics default did not change');
   win2.close();
 });
 
@@ -477,6 +575,28 @@ await test('audio failures are relabelled so Unity retries instead of dying', ()
     const result = proto.play.call({ pause() {}, load() {} });
     ok(result === undefined || typeof result.then === 'function', 'play() is intercepted');
   }
+  win.close();
+});
+
+await test('an idle media element gives its source back', () => {
+  const win = bootPage();
+  // WebKit keeps a decoder alive for as long as the element is in the
+  // document. Unity creates one element per channel, so the page sweeps the
+  // ones nobody is using.
+  const idle = win.document.createElement('audio');
+  idle.setAttribute('src', 'blob:https://example.test/leftover');
+  win.document.body.appendChild(idle);
+  const released = win.SKPerf.internals().releaseIdleAudio();
+  eq(released, 1, 'the idle element was released');
+  eq(idle.getAttribute('src'), null, 'and its source is gone');
+
+  // An element that is playing is left alone.
+  const playing = win.document.createElement('audio');
+  playing.setAttribute('src', 'blob:https://example.test/music');
+  Object.defineProperty(playing, 'paused', { value: false, configurable: true });
+  win.document.body.appendChild(playing);
+  eq(win.SKPerf.internals().releaseIdleAudio(), 0, 'a playing element is not touched');
+  eq(playing.getAttribute('src'), 'blob:https://example.test/music', 'and keeps its source');
   win.close();
 });
 

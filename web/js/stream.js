@@ -46,6 +46,15 @@
   var MAX_RETRIES = 4; // per part (positional sinks only)
   var SEQ_RETRIES = 3; // whole-pass retries for non-positional sinks
   var MAX_WRITES_IN_FLIGHT = 8;
+  // How many parts may be on the wire at the same time. One part at a time
+  // is slow for a reason that has nothing to do with the bandwidth: every
+  // part is its own HTTP request, so the round-trip latency of 100 requests
+  // adds up to minutes on a phone. Four at a time keeps the connection busy
+  // while the previous parts are still being written to the disk, and the
+  // RAM cost stays at a few chunks because the parts are written to the
+  // sink as they arrive instead of being buffered.
+  var DEFAULT_CONCURRENCY = 4;
+  var MAX_CONCURRENCY = 4;
   var WRITE_TIMEOUT = 180000; // ms per worker write
   var OPEN_TIMEOUT = 60000; // ms for open/stat/marker calls
   var PROGRESS_THROTTLE = 120; // ms
@@ -580,7 +589,7 @@
         p.onAdvance();
 
         inFlight.push(p.sink.write(usable, at, flush));
-        if (inFlight.length >= MAX_WRITES_IN_FLIGHT) {
+        if (inFlight.length >= (p.maxWritesInFlight || MAX_WRITES_IN_FLIGHT)) {
           await Promise.all(inFlight);
           inFlight = [];
         }
@@ -650,6 +659,13 @@
 
   /**
    * Stream every part into `sink`; `startOffset` is what is already on disk.
+   *
+   * Several parts are on the wire at the same time (see DEFAULT_CONCURRENCY):
+   * one part at a time spends most of the download waiting for the next
+   * round trip, and the community build is 100 parts. The parts are *not*
+   * buffered — each one is written to the sink at its own offset as its
+   * chunks arrive, so only the chunks that happen to be in flight are ever
+   * in memory.
    */
   async function streamAll(opts) {
     var parts = opts.parts;
@@ -665,6 +681,16 @@
       total += parts[i].bytes;
     }
 
+    // A sink that can only be written to in order (the createWritable
+    // fallback and the RAM sink) cannot take parts out of order, so those
+    // keep the old one-at-a-time behaviour.
+    var wanted = Number(opts.concurrency);
+    if (!isFinite(wanted) || wanted < 1) wanted = DEFAULT_CONCURRENCY;
+    var concurrency = sink.sequentialOnly ? 1 : Math.max(1, Math.min(wanted, MAX_CONCURRENCY, parts.length));
+    // Every part keeps a few writes in flight; with several parts running
+    // that adds up, so the budget is shared.
+    var writesPerPart = Math.max(2, Math.floor(MAX_WRITES_IN_FLIGHT / concurrency));
+
     var passes = sink.sequentialOnly ? SEQ_RETRIES : 1;
     var lastErr = null;
 
@@ -677,55 +703,75 @@
           startOffset = reopened.canResume ? reopened.size : 0;
         }
 
-        var accounted = 0;
         var lastReport = 0;
         var currentPart = 0;
         var began = now();
+        // Bytes accounted for per part: the parts that are already on disk
+        // count as complete, the ones being downloaded count what they have
+        // written so far.
+        var written = new Array(parts.length);
+        var todo = [];
+
+        for (i = 0; i < parts.length; i++) {
+          var part = parts[i];
+          if (part.offset + part.bytes <= startOffset) {
+            written[i] = part.bytes;
+            continue;
+          }
+          written[i] = 0;
+          todo.push(i);
+        }
+
+        function accounted() {
+          var sum = 0;
+          for (var k = 0; k < written.length; k++) sum += written[k];
+          return sum;
+        }
 
         function report(force) {
           if (!opts.onProgress) return;
           var t = now();
           if (!force && t - lastReport < PROGRESS_THROTTLE) return;
           lastReport = t;
+          var done = accounted();
           var elapsed = (t - began) / 1000;
-          var rate = elapsed > 0.5 ? accounted / elapsed : 0;
+          var rate = elapsed > 0.5 ? done / elapsed : 0;
           opts.onProgress({
-            loaded: Math.min(accounted, total),
+            loaded: Math.min(done, total),
             total: total,
             part: currentPart,
             parts: parts.length,
             pass: pass + 1,
             bytesPerSecond: rate,
-            etaSeconds: rate > 0 ? Math.max(0, (total - accounted) / rate) : 0,
+            etaSeconds: rate > 0 ? Math.max(0, (total - done) / rate) : 0,
           });
         }
 
-        function makeAdvance(prog, base) {
+        function makeAdvance(index, prog, skip) {
           return function () {
-            accounted = base + prog.written;
+            // `prog.written` counts the bytes this attempt wrote; the
+            // skipped prefix of a resumed part is already on disk. The
+            // count only ever grows: the streamer resets it to zero when a
+            // part is done, and the progress bar must not fall back.
+            var value = skip + prog.written;
+            if (value > written[index]) written[index] = value;
             report(false);
           };
         }
 
-        for (i = 0; i < parts.length; i++) {
-          var p = parts[i];
-          currentPart = i + 1;
+        var failed = null;
+        var next = 0;
 
-          if (p.offset + p.bytes <= startOffset) {
-            accounted = p.offset + p.bytes;
-            report(true);
-            continue;
-          }
-
+        async function runPart(index) {
+          var p = parts[index];
           var skip = Math.max(0, startOffset - p.offset);
           var progress = { written: 0 };
-          var baseForPart = p.offset + skip;
-          var onAdvance = makeAdvance(progress, baseForPart);
+          var onAdvance = makeAdvance(index, progress, skip);
 
           await fetchPartTo({
             url: p.url,
             bytes: p.bytes,
-            index: currentPart,
+            index: index + 1,
             sink: sink,
             partOffset: p.offset,
             skip: skip,
@@ -734,11 +780,36 @@
             log: opts.log,
             progress: progress,
             onAdvance: onAdvance,
+            maxWritesInFlight: writesPerPart,
           });
 
-          accounted = p.offset + p.bytes;
+          written[index] = p.bytes;
           report(true);
         }
+
+        // The queue: `concurrency` parts are fetched at the same time, and
+        // each of them is written to the sink at its own offset.
+        var workers = [];
+        for (var w = 0; w < concurrency; w++) {
+          workers.push(
+            (async function () {
+              for (;;) {
+                if (failed) return;
+                if (next >= todo.length) return;
+                var index = todo[next++];
+                if (index + 1 > currentPart) currentPart = index + 1;
+                try {
+                  await runPart(index);
+                } catch (err) {
+                  failed = err;
+                  return;
+                }
+              }
+            })()
+          );
+        }
+        await Promise.all(workers);
+        if (failed) throw failed;
 
         report(true);
         return { total: total };
@@ -969,7 +1040,8 @@
    * @param {object} opts
    *   parts, expectedSize, cacheKey, buildId, dirName, mime, verify,
    *   onProgress, onStatus, onLog, signal, fetchImpl, workerUrl,
-   *   writerFactory (tests), allowMemoryFallback (default true)
+   *   writerFactory (tests), allowMemoryFallback (default true),
+   *   concurrency (how many parts are fetched at once, default 4)
    * @returns {Promise<{url,size,kind,file,sink,dispose,verify}>}
    */
   async function ensureDataset(opts) {
@@ -1034,6 +1106,7 @@
       parts: opts.parts,
       sink: memSink,
       startOffset: 0,
+      concurrency: opts.concurrency,
       onProgress: opts.onProgress,
       fetchImpl: opts.fetchImpl,
       signal: opts.signal,
@@ -1199,6 +1272,7 @@
       parts: opts.parts,
       sink: sink,
       startOffset: startOffset,
+      concurrency: opts.concurrency,
       onProgress: opts.onProgress,
       fetchImpl: opts.fetchImpl,
       signal: opts.signal,
