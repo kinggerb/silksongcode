@@ -40,7 +40,7 @@
 })(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
 
-  var VERSION = '1.0.3';
+  var VERSION = '1.0.4';
   var DEFAULT_DIR = 'silksong-webgl-cache';
   var FLUSH_EVERY = 32 * 1024 * 1024; // flush OPFS about every 32 MB
   var MAX_RETRIES = 4; // per part (positional sinks only)
@@ -84,6 +84,17 @@
     var e = new Error('aborted');
     e.name = 'AbortError';
     return e;
+  }
+
+  /**
+   * An unexpected HTTP status. `status` and `url` ride along so the caller can
+   * tell "the host is rate limiting us" (403/429) from "this file is broken".
+   */
+  function httpError(status, url) {
+    var error = new Error('HTTP ' + status + ' for ' + url);
+    error.status = status;
+    error.url = url;
+    return error;
   }
   function sleep(ms, signal) {
     return new Promise(function (resolve, reject) {
@@ -521,7 +532,10 @@
       request.headers = { Range: 'bytes=' + (p.rangeStart + p.skip) + '-' + (p.rangeEnd - 1) };
     }
     var res = await p.fetchImpl(p.url, request);
-    if (!res.ok) throw new Error('HTTP ' + res.status + ' for ' + p.url);
+    // The status travels with the error, so a caller that knows what a `429`
+    // from *its* host means can act on it — community-build.js waits out
+    // GitHub's rate limit instead of treating it like a broken download.
+    if (!res.ok) throw httpError(res.status, p.url);
     if (!res.body) throw new Error('no readable body for ' + p.url);
     var wholeFile = ranged && res.status !== 206;
 
@@ -680,9 +694,26 @@
     p.onAdvance();
   }
 
+  /**
+   * How long to wait before another attempt at a part, or -1 to give up.
+   *
+   * This is the built-in backoff (a few seconds, a handful of tries) and it
+   * stays the default; a caller that knows better passes `p.retryAfter`, which
+   * answers for itself. A sink that can only be written in order is never
+   * retried here — a retry would restart the whole file.
+   */
+  function defaultRetryDelay(p, attempt) {
+    if (p.sink && p.sink.sequentialOnly) return -1;
+    var attempts = Number.isFinite(p.retryAttempts) ? p.retryAttempts : MAX_RETRIES;
+    if (attempt >= attempts) return -1;
+    return Math.min(8000, 400 * Math.pow(2, attempt));
+  }
+
   async function fetchPartTo(p) {
     var log = makeLogger(p.log);
-    var attempts = p.sink.sequentialOnly ? 0 : MAX_RETRIES;
+    var attempts = p.sink.sequentialOnly
+      ? 0
+      : (Number.isFinite(p.retryAttempts) ? p.retryAttempts : MAX_RETRIES);
 
     for (var attempt = 0; ; attempt++) {
       if (p.signal && p.signal.aborted) throw abortError();
@@ -693,8 +724,13 @@
         if (err && err.name === 'AbortError') throw err;
         // A manifest mismatch will not fix itself by retrying.
         if (/manifest|rebuild or re-run/i.test(String((err && err.message) || err))) throw err;
-        if (attempt >= attempts) throw err;
-        var wait = Math.min(8000, 400 * Math.pow(2, attempt));
+        // The caller owns the waiting when it passes `retryAfter`: it may want
+        // to wait out a rate limit, or to give up at once on a refusal its own
+        // fetch has already spent an hour retrying. Anything else (null) falls
+        // back to the built-in backoff.
+        var wait = typeof p.retryAfter === 'function' ? p.retryAfter(err, attempt) : null;
+        if (wait === null || wait === undefined) wait = defaultRetryDelay(p, attempt);
+        if (!(wait >= 0)) throw err;
         log(
           'part ' +
             p.index +
@@ -702,11 +738,10 @@
             ((err && err.message) || err) +
             '), retrying in ' +
             wait +
-            'ms (attempt ' +
-            (attempt + 2) +
-            '/' +
-            (attempts + 1) +
-            ')'
+            'ms' +
+            (typeof p.retryAfter === 'function'
+              ? ''
+              : ' (attempt ' + (attempt + 2) + '/' + (attempts + 1) + ')')
         );
         await sleep(wait, p.signal);
       }
@@ -845,6 +880,8 @@
             progress: progress,
             onAdvance: onAdvance,
             maxWritesInFlight: writesPerPart,
+            retryAfter: opts.retryAfter,
+            retryAttempts: opts.retryAttempts,
           });
 
           written[index] = p.bytes;
@@ -1105,7 +1142,8 @@
    *   parts, expectedSize, cacheKey, buildId, dirName, mime, verify,
    *   onProgress, onStatus, onLog, signal, fetchImpl, workerUrl,
    *   writerFactory (tests), allowMemoryFallback (default true),
-   *   concurrency (how many parts are fetched at once, default 4)
+   *   concurrency (how many parts are fetched at once, default 4),
+   *   retryAfter (a caller-owned backoff: f(error, attempt) -> ms, -1 to stop)
    * @returns {Promise<{url,size,kind,file,sink,dispose,verify}>}
    */
   async function ensureDataset(opts) {
@@ -1179,6 +1217,8 @@
       fetchImpl: opts.fetchImpl,
       signal: opts.signal,
       log: opts.onLog,
+      retryAfter: opts.retryAfter,
+      retryAttempts: opts.retryAttempts,
     });
     var memDone = await memSink.finish();
     if (expectedSize && memDone.size !== expectedSize) {
@@ -1345,6 +1385,8 @@
       fetchImpl: opts.fetchImpl,
       signal: opts.signal,
       log: opts.onLog,
+      retryAfter: opts.retryAfter,
+      retryAttempts: opts.retryAttempts,
     });
 
     var finished = await sink.finish();
@@ -1487,6 +1529,8 @@
       fetchPartOnce: fetchPartOnce,
       contentLengthIsTruthful: contentLengthIsTruthful,
       fetchPartTo: fetchPartTo,
+      defaultRetryDelay: defaultRetryDelay,
+      httpError: httpError,
       sleep: sleep,
       noop: noop,
       OPEN_LOCK: OPEN_LOCK,

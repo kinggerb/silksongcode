@@ -42,9 +42,13 @@ maintainer's request, with their stated permission to reuse it.
   spare. The cutscene plays as a black frame.
 
 The first run therefore needs Wi-Fi, a normal (non-Private) Safari tab, and
-roughly 1.3 GiB of free storage. Leave the tab in the foreground. Later runs reuse
-the cached archive. If OPFS or the available quota is insufficient, the player
-will explain that rather than trying to put a multi-gigabyte ZIP in RAM.
+roughly 1.3 GiB of free storage. Leave the tab in the foreground. GitHub rate
+limits unauthenticated downloads, so a download can be made to pause part-way
+through — the player waits it out and carries on rather than stopping; see
+[A 403 in the middle of the download](#a-403-in-the-middle-of-the-download).
+Later runs reuse the cached archive. If OPFS or the available quota is
+insufficient, the player will explain that rather than trying to put a
+multi-gigabyte ZIP in RAM.
 
 ## The slim archive
 
@@ -193,6 +197,71 @@ is already on the mirror is never mirrored, so a download cannot ping-pong
 between two hosts that are both refusing it. Both `stream.ensureDataset` calls
 and the archive plan read through that one wrapper;
 `tools/test-community-build.mjs` pins all of it.
+
+## A 403 in the middle of the download
+
+Raw leads because it serves every part — but not every *request*. GitHub rate
+limits unauthenticated downloads (60 requests an hour per IP since
+[May 2025](https://github.blog/changelog/2025-05-08-updated-rate-limits-for-unauthenticated-requests/)),
+and a part is one request. This archive is **75** of them, so a single first
+run can outrun the budget on its own, and the answer is the same `403` a
+browser sees for a file it may not have:
+
+```
+HTTP 403 for https://raw.githubusercontent.com/kinggerb/silksongcode/<pin>/parts/WebGL.zip.part28
+```
+
+a third of the way in, with jsDelivr equally unwilling (its `403` is about the
+package and never changes) and a few seconds of retries in between. Nothing was
+wrong with the bytes: the parts already on the device were fine, and a reload
+would have resumed from them — but no download was going to *finish*.
+
+The two refusals look alike and are not:
+
+| refusal | what it means | what the page does |
+| --- | --- | --- |
+| `403` / `429` from `raw.githubusercontent.com` | GitHub wants us to slow down | **waits it out** and asks again |
+| `403` from `cdn.jsdelivr.net` | `Package size exceeded the configured limit of 150 MB` — about the package, true for every part it has not already cached | takes it as final, and stops asking the mirror for the rest of the download |
+| anything else (404, 408, 5xx, an unreachable host) | this host, this moment | asks the mirror once, keeps the downloader's own backoff |
+
+Waiting is bounded, because a pause costs the user's time even though it costs
+nothing else: escalating pauses — 30 s, 1 min, 2 min, 5 min, then 15 min —
+until a budget is spent, 90 minutes by default (`?archiveWait=<minutes>`
+changes it; the seven first pauses add up to 53 minutes, so an hour would stop
+a few minutes short of the very window it is waiting for). The budget is shared
+by the whole download, and so is each pause: the six parts that are on the wire
+at once wait *together* instead of each spending a request to be told the same
+thing — refusals that arrive together are one round, not one escalation each.
+A part that gets through starts the escalation over.
+
+When GitHub says how long it wants — `retry-after`, or `x-ratelimit-reset` —
+that is the wait, floored at five seconds and read at the moment the answer
+arrives, so a part that sat behind another part's pause does not serve the same
+hour twice. Cross-origin those headers are usually not readable, and then the
+escalation is the guess.
+
+When the budget runs out the page says so — and the parts already saved stay
+saved, so starting again carries on from there.
+
+The status line reads `GitHub is rate-limiting the download (HTTP 403) —
+pausing 2 min. Nothing is lost, it carries on where it stopped.`, and the log
+panel records every pause.
+
+Two details make it safe: the waiting lives in the fetch wrapper, so the
+downloader does not spend its own four retries (eight more requests) on a
+refusal that has already been waited out — `archiveRetryAfter` gives up on a
+rate limit at once and leaves every other failure to the usual backoff; and
+`tools/test-community-build.mjs` runs the whole thing on a clock the tests
+control, including a download that is refused from the fourth part of six and
+still finishes.
+
+> **The durable fix is to re-host the archive.** A waiting page is a page the
+> user has to keep open. GitHub *release* assets are served from
+> `objects.githubusercontent.com` with no per-hour request budget and a 2 GB
+> per-file limit; publishing the 75 parts as release assets (one release per
+> publish, pinned by tag) would let the download run at full speed and leave
+> raw and jsDelivr as fallbacks. That needs the bytes re-uploaded —
+> `publish_assets.py` would gain a release path — not a page change.
 
 ## What the upstream loader expects from the page
 

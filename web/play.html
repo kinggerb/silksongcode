@@ -2628,6 +2628,16 @@
       // can be forced with ?archiveBase=<url> — see web/COMMUNITY-BUILD.md.
       base: params.get('archiveBase') || (source.assetArchive && source.assetArchive.base) || ASSET_BASE,
       workerUrl: 'js/writer.js',
+      // GitHub hands out a limited number of files an hour to a page that is
+      // not signed in, and the archive is 75 of them: a refusal in the middle
+      // of the download is a rate limit, and the loader waits it out instead
+      // of giving up. ?archiveWait=<minutes> says how long it may go on for
+      // (90 minutes by default: seven escalating pauses add up to 53 min, and
+      // an hour would stop a few minutes short of the window it waits for).
+      rateLimitBudgetMs: (function () {
+        var minutes = Number(params.get('archiveWait'));
+        return (isFinite(minutes) && minutes > 0 ? minutes : 60) * 60000;
+      })(),
       onStatus: function (message) { setStatus('Game assets: ' + message); },
       onPlan: function (plan) {
         // The cutscenes (and any bundle for another platform) are left out of
@@ -2791,6 +2801,13 @@
         (String(message).match(/quota|Quota|space/i)
           ? 'There is not enough free storage on this device. Free up ~' + gb(totalBytes || 2 * 1073741824) +
             ' (Settings ▸ General ▸ iPad Storage) and tap start again.\n\n'
+          : '') +
+        (/HTTP (403|429)/.test(String(message)) && /githubusercontent\.com|github\.com/.test(String(message))
+          ? 'GitHub only lets a page that is not signed in download so many files an hour, and the ' +
+            'asset archive is one file per part — so it refused partway through. The loader waits and ' +
+            'carries on by itself; if it ran out of patience, leave it an hour and tap start again ' +
+            '(the parts already saved are kept). You can also serve the parts yourself with ' +
+            '?archiveBase=https://your-host/parts/ — see web/COMMUNITY-BUILD.md.\n\n'
           : '') +
         'Details are in the Menu ▸ Log panel. If the tab was killed while loading, the ' +
         'game data is still cached — tapping start again continues where it stopped.';

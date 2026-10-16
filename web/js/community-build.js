@@ -78,7 +78,7 @@
   }
 
   /* ---------------------------------------------------------------- *
-   * A second host for the archive
+   * Two hosts for the archive, and one of them says "later"
    *
    * The parts are published from this repository, and two hosts serve
    * them — but they do not serve them equally. jsDelivr refuses a
@@ -87,17 +87,36 @@
    * while raw.githubusercontent.com serves every committed blob under
    * 100 MB and each part is 16 MiB.
    *
-   * The refusal is per request, not per package: a part jsDelivr has
-   * already cached keeps serving, so a download gets some way in and
-   * then dies on the first part that was not — `HTTP 403 for
+   * The jsDelivr refusal is per request, not per package: a part it
+   * has already cached keeps serving, so a download gets some way in
+   * and then dies on the first part that was not — `HTTP 403 for
    * …/parts/WebGL.zip.part6`, six parts into seventy-five. That is
    * also why the descriptor names raw as `base` and keeps jsDelivr as
    * the `mirror`: the host that always answers leads, and the CDN that
    * is faster when it does answer is the fallback.
    *
-   * So the fetch the downloader uses is wrapped: a part that is
-   * refused — or a host that cannot be reached at all — is asked for
-   * once more from the other host, at the same path.
+   * GitHub raw answers the same way for a different reason. It rate
+   * limits unauthenticated downloads — 60 requests an hour per IP
+   * since May 2025 — and a part is one request, so this archive, 75
+   * parts strong, can outrun the budget on its own. The answer is
+   * `403` (or `429`) in the middle of a perfectly good download:
+   *
+   *     HTTP 403 for …/parts/WebGL.zip.part28
+   *
+   * a third of the way in, with jsDelivr equally unwilling and four
+   * retries' worth of a few seconds each spent before the page gave
+   * up. The bytes already on the device were fine — the download
+   * resumes from them — but nothing was going to finish.
+   *
+   * So the fetch the downloader uses is wrapped twice over:
+   *
+   *   - a part that is refused — or a host that cannot be reached at
+   *     all — is asked for once more from the other host, at the same
+   *     path;
+   *   - a refusal that is GitHub asking us to slow down is *waited
+   *     out* instead of answered with a shrug (see the rate limit
+   *     below), because the limit is measured in minutes and the
+   *     download is measured in parts.
    * ---------------------------------------------------------------- */
 
   /**
@@ -134,11 +153,222 @@
     return join(mirror, String(url).slice(root.length).replace(/^\/+/, ''));
   }
 
+  /* ---------------------------------------------------------------- *
+   * Waiting out a rate limit
+   *
+   * A `403` from raw.githubusercontent.com usually is not about the
+   * part: it is GitHub telling an unauthenticated page that it has
+   * had its share of files for this hour. Nothing about the bytes is
+   * wrong, and waiting — minutes, not seconds — is all it takes.
+   *
+   * Two refusals look alike and are not. jsDelivr's `403` carries
+   * `Package size exceeded the configured limit of 150 MB`, which is
+   * about the *package*, is true for every part it has not already
+   * cached, and will still be true in an hour. GitHub's is about the
+   * *hour*. So only a refusal from a GitHub host is waited out, and a
+   * mirror that has refused once is not asked again for the rest of
+   * the download.
+   *
+   * Waiting is not free — the tab has to stay open — so it is
+   * bounded: escalating pauses (30 s, 1 min, 2 min, 5 min, then
+   * 15 min) until a budget (an hour) is spent, and every pause is
+   * shared by all the parts on the wire at once, so six in-flight
+   * parts do not each spend a request to be told the same thing.
+   * ---------------------------------------------------------------- */
+
+  var RATE_LIMIT_WAITS = [30000, 60000, 120000, 300000, 900000];
+  // GitHub's budget is an hour, and the pauses below reach 53 minutes in seven
+  // rounds — giving up at 60 would stop a handful of minutes short of the very
+  // window it is waiting for. Ninety minutes covers an hour with room to spare.
+  var RATE_LIMIT_BUDGET = 90 * 60 * 1000;
+  // The floor and the ceiling of a wait the host asked for itself: never a
+  // request in the same breath (a host whose clock is wrong must not be
+  // hammered), and never an afternoon.
+  var RATE_LIMIT_MIN_WAIT = 5000;
+  var RATE_LIMIT_MAX_WAIT = 2 * 60 * 60 * 1000;
+  // How often the status line is refreshed while a pause runs. A quarter of an
+  // hour of the same sentence otherwise reads as a hung tab.
+  var RATE_LIMIT_TICK = 15000;
+
+  /** The statuses a host answers with when it wants us to slow down. */
+  function isRateLimitStatus(status) {
+    return status === 403 || status === 429;
+  }
+
+  /** Does `url` live on a host whose refusals are rate limits? */
+  function isGitHubHost(url) {
+    try {
+      var host = new URL(String(url)).hostname.toLowerCase();
+      return /(^|\.)githubusercontent\.com$/.test(host) || /(^|\.)github\.com$/.test(host);
+    } catch (e) {
+      return false;
+    }
+  }
+
+  /**
+   * How long the host itself says to wait, in ms — 0 when it says nothing a
+   * page is allowed to read.
+   *
+   * GitHub answers a rate limit with `x-ratelimit-reset` (a UTC epoch second)
+   * and often `retry-after`. Neither is a CORS-safelisted header, so a page on
+   * another origin usually gets `null` for both and has to guess; when the
+   * host does expose them, that is the whole wait.
+   */
+  function rateLimitHint(response, now) {
+    if (!response || !response.headers || typeof response.headers.get !== 'function') return 0;
+    try {
+      var retryAfter = Number(response.headers.get('retry-after') || 0);
+      if (retryAfter > 0) return Math.round(retryAfter * 1000);
+      var reset = Number(response.headers.get('x-ratelimit-reset') || 0);
+      if (reset > 0) {
+        var ms = reset * 1000 - now();
+        if (ms > 0) return ms;
+      }
+    } catch (e) {
+      /* a header the browser will not hand over: fall back to guessing */
+    }
+    return 0;
+  }
+
+  /** "90 s", "15 min". */
+  function describeWait(ms) {
+    if (ms < 60000) return Math.round(ms / 1000) + ' s';
+    return Math.round(ms / 60000) + ' min';
+  }
+
+  function sleep(ms, signal) {
+    return new Promise(function (resolve, reject) {
+      if (signal && signal.aborted) return reject(abortError());
+      var timer = setTimeout(done, ms);
+      function done() {
+        if (signal) signal.removeEventListener('abort', onAbort);
+        resolve();
+      }
+      function onAbort() {
+        clearTimeout(timer);
+        reject(abortError());
+      }
+      if (signal) signal.addEventListener('abort', onAbort, { once: true });
+    });
+  }
+
+  function abortError() {
+    var error = new Error('aborted');
+    error.name = 'AbortError';
+    return error;
+  }
+
+  /**
+   * The book-keeping for waiting out a rate limit, shared by every part of
+   * one download. Without a `sleep` there is no waiting at all, which is what
+   * keeps this out of the way of tests and of callers that want the plain
+   * one-retry behaviour.
+   */
+  function rateLimiter(options) {
+    options = options || {};
+    var waits = options.waits && options.waits.length ? options.waits : RATE_LIMIT_WAITS;
+    var budget = options.budgetMs === undefined ? RATE_LIMIT_BUDGET : options.budgetMs;
+    var now = options.now || function () { return Date.now(); };
+    var sleepImpl = options.sleep || null;
+    var round = 0;
+    var spent = 0;
+    var until = 0;
+
+    return {
+      /** Waiting is possible at all: only a caller that can sleep can wait. */
+      canWait: function () {
+        return Boolean(sleepImpl);
+      },
+      /** Is a refusal of `url` with `status` one that waiting can fix? */
+      worthWaitingFor: function (url, status) {
+        return Boolean(sleepImpl) && isRateLimitStatus(status) && isGitHubHost(url);
+      },
+      /**
+       * Sleep out a pause — one another part started, usually. `onTick`, when
+       * the caller passes one, is called with what is left of it so the page
+       * can count down instead of sitting on one sentence for a quarter of an
+       * hour; without one the whole pause is slept in one go.
+       */
+      wait: async function (signal, onTick) {
+        if (!sleepImpl) return 0;
+        var total = until - now();
+        if (total <= 0) return 0;
+        if (!onTick) {
+          await sleepImpl(total, signal);
+          return total;
+        }
+        for (;;) {
+          var left = until - now();
+          if (left <= 0) break;
+          onTick(left, total);
+          await sleepImpl(Math.min(left, RATE_LIMIT_TICK), signal);
+        }
+        return total;
+      },
+      /**
+       * The moment the host itself says to come back, as an absolute time on
+       * this limiter's clock — 0 when it says nothing.
+       *
+       * Absolute, because a part can sit behind a pause another part started
+       * before it gets to act on the answer: a `retry-after: 3600` read at
+       * 09:00 is not an hour from 09:15.
+       */
+      deadlineFrom: function (response) {
+        var hint = rateLimitHint(response, now);
+        return hint > 0 ? now() + hint : 0;
+      },
+      /**
+       * Start the next pause, or join the one that is already running: ms to
+       * wait, or -1 when the budget is spent.
+       *
+       * Six parts refused together are one piece of news, not six, so a
+       * refusal that arrives while a pause is still running joins it instead
+       * of making the wait six times longer — and it does not spend the
+       * budget twice, because the parts sit out the same minutes.
+       *
+       * `deadline` is the moment the host asked us to come back (see
+       * `deadlineFrom`), and what is left of it wins over guessing. A
+       * deadline that has already gone by — the part waited it out behind a
+       * pause another part started — is ignored rather than waited for again.
+       */
+      pause: function (deadline) {
+        if (now() < until) return Math.max(0, until - now());
+        round++;
+        var wait = waits[Math.min(round - 1, waits.length - 1)];
+        if (deadline > 0) {
+          // What is left of what the host asked for — floored, so a deadline
+          // that has already gone by (the part waited it out behind another
+          // part's pause) costs a few seconds instead of a wasted round.
+          var asked = Math.max(deadline - now(), 0);
+          wait = Math.min(Math.max(asked, RATE_LIMIT_MIN_WAIT), RATE_LIMIT_MAX_WAIT);
+        }
+        if (spent + wait > budget) {
+          until = 0; // out of patience: nothing to join any more
+          return -1;
+        }
+        spent += wait;
+        until = now() + wait;
+        return wait;
+      },
+      /** A request got through: the host is answering again, start over. */
+      reset: function () {
+        round = 0;
+        until = 0;
+      },
+      spentMs: function () {
+        return spent;
+      },
+    };
+  }
+
   /**
    * Wrap a fetch so a part the archive's own host refuses is retried once
-   * against the mirror. The retry is exactly one: if the mirror refuses it
-   * too, that answer is what the caller gets, so a download cannot ping-pong
-   * between two hosts that are both saying no.
+   * against the mirror — and so a refusal that is only a rate limit is waited
+   * out and asked for again.
+   *
+   * Both are bounded: the mirror is asked exactly once per attempt, and the
+   * waiting stops when the rate limit's budget is spent, so two hosts that are
+   * both saying no cannot keep a download dangling for ever.
    *
    * Anything that is not a URL under `base` passes straight through, so the
    * wrapper is safe to hand to a downloader that also fetches other files.
@@ -148,6 +378,8 @@
     var base = options.base;
     var mirror = options.mirror;
     var onLog = typeof options.onLog === 'function' ? options.onLog : function () {};
+    var onStatus = typeof options.onStatus === 'function' ? options.onStatus : null;
+    var limit = options.rateLimit || null;
     var inner = typeof fetchImpl === 'function' ? fetchImpl : function (input, init) { return fetch(input, init); };
 
     function urlOf(input) {
@@ -157,6 +389,26 @@
       return '';
     }
 
+    /** One request. A host that cannot be reached at all comes back as `{error}`. */
+    async function attempt(target, init) {
+      try {
+        return { response: await inner(target, init) };
+      } catch (error) {
+        // An abort is the caller's own doing and is never retried somewhere else.
+        if (init && init.signal && init.signal.aborted) throw error;
+        return { error: error };
+      }
+    }
+
+    /**
+     * A response the caller can have as it is: a good one, or one the mirror
+     * cannot improve on. A host that could not be reached at all has no
+     * response, and that is exactly when the mirror is worth asking.
+     */
+    function settled(response) {
+      return !response || response.ok || !retryableStatus(response.status);
+    }
+
     return async function mirroredFetch(input, init) {
       var url = urlOf(input);
       var fallback = mirrorUrlFor(url, base, mirror);
@@ -164,34 +416,130 @@
       // like the fetch that was handed in.
       if (!fallback) return inner(input, init);
 
-      try {
-        var response = await inner(input, init);
-        if (!response || response.ok || !retryableStatus(response.status)) return response;
-        onLog('HTTP ' + response.status + ' for ' + url + ' — asking the mirror');
-      } catch (error) {
-        // A host that cannot be reached at all (DNS, TLS, a reset
-        // connection) throws instead of answering. The mirror is the only
-        // second opinion there is — but an abort is the caller's own doing,
-        // and is rethrown rather than retried somewhere else.
-        if (init && init.signal && init.signal.aborted) throw error;
-        onLog('could not reach ' + url + ' (' + ((error && error.message) || error) + ') — asking the mirror');
+      // jsDelivr refuses this package outright, for every part it has not
+      // already cached, and no amount of waiting changes that. Once it has
+      // said no, it is not asked again for the rest of the download.
+      var mirrorRefused = false;
+
+      /** What the page shows while a pause runs (a countdown, so it reads as waiting rather than hanging). */
+      function ticking(left) {
+        if (!onStatus) return;
+        onStatus(
+          'GitHub is rate-limiting the download — ' + describeWait(left) +
+            ' to go. Nothing is lost, it carries on where it stopped.'
+        );
       }
-      return inner(fallback, init);
+
+      for (;;) {
+        // A pause another part started: wait it out instead of spending a
+        // request on a host that has already said "later".
+        if (limit) await limit.wait(init && init.signal, onStatus ? ticking : null);
+
+        var first = await attempt(input, init);
+        if (!first.error && settled(first.response)) {
+          if (limit) limit.reset();
+          return first.response;
+        }
+        // The moment the host asked us to come back, read now: a part that
+        // waits behind another part's pause before acting on it has already
+        // served part of that wait.
+        var deadline = limit && first.response ? limit.deadlineFrom(first.response) : 0;
+
+        // The mirror is the only second opinion there is — unless it has
+        // already refused this package, which for jsDelivr means it will
+        // refuse every part of it.
+        var refused = null;
+        if (!mirrorRefused) {
+          if (first.error) {
+            onLog('could not reach ' + url + ' (' + ((first.error && first.error.message) || first.error) + ') — asking the mirror');
+          } else {
+            onLog('HTTP ' + first.response.status + ' for ' + url + ' — asking the mirror');
+          }
+          var second = await attempt(fallback, init);
+          if (second.error) throw second.error;
+          if (settled(second.response)) {
+            if (limit) limit.reset();
+            return second.response;
+          }
+          refused = second.response;
+          // jsDelivr's 403 is about the package, not about the hour, so it is
+          // not going to change: the mirror is not asked again.
+          if (refused && refused.status === 403) mirrorRefused = true;
+        }
+
+        // Only the host that leads can be worth waiting for: a status is
+        // GitHub telling us to slow down, a network error is not, and the
+        // mirror's own refusal is answered by leaving it alone.
+        if (!limit || !first.response || !limit.worthWaitingFor(url, first.response.status)) {
+          if (refused) return refused;
+          if (first.error) throw first.error;
+          return first.response;
+        }
+
+        var wait = limit.pause(deadline);
+        if (wait < 0) {
+          onLog(
+            'GitHub kept refusing the archive with HTTP ' + first.response.status + ' for ' +
+              Math.round(limit.spentMs() / 60000) + ' minutes — giving up. Nothing is lost: the ' +
+              'parts already saved are kept, and starting again carries on from there.'
+          );
+          return refused || first.response;
+        }
+        var message =
+          'GitHub is rate-limiting the download (HTTP ' + first.response.status +
+          ') — pausing ' + describeWait(wait) + '. Nothing is lost, it carries on where it stopped.';
+        onLog(message);
+        if (onStatus) onStatus(message);
+      }
     };
   }
 
   /**
    * The fetch the archive should be downloaded with: the caller's own,
    * wrapped so a refused or unreachable part is asked for again from the
-   * mirror named in the descriptor.
+   * mirror named in the descriptor, and so a rate limit is waited out.
    */
-  function archiveFetch(config, options, base) {
+  function archiveFetch(config, options, base, limit) {
     var archive = config.assetArchive || {};
     return mirrorFetch(options.fetchImpl, {
       base: base,
       mirror: archive.mirror,
       onLog: options.onLog,
+      onStatus: options.onStatus,
+      rateLimit: limit === undefined ? archiveRateLimit(options) : limit,
     });
+  }
+
+  /**
+   * The rate limiter for one download: shared by the fetch and by the
+   * downloader's own backoff, so every part waits on the same clock.
+   * `options.rateLimit: false` turns the waiting off (a caller that wants the
+   * plain one-retry behaviour), and a limiter can be handed in instead.
+   */
+  function archiveRateLimit(options) {
+    if (options.rateLimit === false) return null;
+    if (options.rateLimit) return options.rateLimit;
+    return rateLimiter({
+      waits: options.rateLimitWaits,
+      budgetMs: options.rateLimitBudgetMs,
+      now: options.now,
+      sleep: options.sleep || sleep,
+    });
+  }
+
+  /**
+   * The backoff the downloader should use for a part that failed.
+   *
+   * A rate limit has already been waited out by the fetch above — an hour of
+   * it, if that is what it took — so once it gives up, spending four more
+   * attempts on the same refusal would only take ten more requests from the
+   * host that is short of them. Everything else keeps the downloader's own
+   * backoff (null: "you decide").
+   */
+  function archiveRetryAfter() {
+    return function (err) {
+      return err && err.url && isRateLimitStatus(err.status) && isGitHubHost(err.url) ? -1 : null;
+    };
   }
 
   function parts(config, base) {
@@ -366,9 +714,15 @@
     var partList = parts(config, base);
     // Every request for a part goes through this fetch — the plan's range
     // requests as well as the download — so a host that refuses a part is
-    // asked for again from the mirror named in the descriptor, instead of
-    // failing a 1.19 GB download six parts in.
-    var fetchImpl = archiveFetch(config, options, base);
+    // asked for again from the mirror named in the descriptor, and a host
+    // that is rate limiting us is waited out, instead of failing a 1.19 GB
+    // download a third of the way in.
+    var limit = archiveRateLimit(options);
+    var fetchImpl = archiveFetch(config, options, base, limit);
+    // Waiting out a rate limit is the fetch's job, so the downloader must not
+    // spend its own retry budget on the same refusal — see archiveRetryAfter.
+    // With no waiting (no way to sleep) the downloader keeps its backoff.
+    var retryAfter = limit && limit.canWait() ? archiveRetryAfter() : null;
 
     // Work out whether the archive can be made smaller before a single
     // byte of it is downloaded. An archive that says it is already slim has
@@ -415,6 +769,8 @@
         allowMemoryFallback: false,
         concurrency: options.concurrency || 6,
         fetchImpl: fetchImpl,
+        retryAfter: retryAfter,
+        retryAttempts: options.retryAttempts,
         onProgress: options.onProgress,
         onStatus: options.onStatus,
         onLog: options.onLog,
@@ -441,6 +797,8 @@
       // The archive is 75 parts: one at a time is minutes of round trips.
       concurrency: options.concurrency || 6,
       fetchImpl: fetchImpl,
+      retryAfter: retryAfter,
+      retryAttempts: options.retryAttempts,
       onProgress: options.onProgress,
       onStatus: options.onStatus,
       onLog: options.onLog,
@@ -932,6 +1290,13 @@
     // which asks the descriptor's mirror once when the archive's own host
     // refuses a part (or cannot be reached at all).
     mirrorFetch: mirrorFetch,
+    rateLimiter: rateLimiter,
+    archiveRateLimit: archiveRateLimit,
+    archiveRetryAfter: archiveRetryAfter,
+    isRateLimitStatus: isRateLimitStatus,
+    isGitHubHost: isGitHubHost,
+    RATE_LIMIT_WAITS: RATE_LIMIT_WAITS,
+    RATE_LIMIT_BUDGET: RATE_LIMIT_BUDGET,
     // Exported for the test suite and for anything that wants to build the
     // same placeholder container the build pipeline writes.
     makePlaceholderVideo: function (kind) {
