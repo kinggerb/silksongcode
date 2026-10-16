@@ -2351,6 +2351,32 @@
     throw lastErr || new Error('could not load ' + label);
   }
 
+  /* The community loader is not stock Unity. web-ports serve it from a page
+   * whose <head> carries
+   *     <base href="https://cdn.jsdelivr.net/gh/web-ports/hollow-knight-silksong@master/">
+   * and changed createUnityInstance to ignore config.streamingAssetsUrl in
+   * favour of
+   *     new URL("StreamingAssets", document.querySelector('base').href).href
+   * This page has no <base>, so on iPad Safari that line died with "null is not
+   * an object (evaluating 'document.querySelector('base').href')" the moment the
+   * 2 GB archive was cached and Unity was started.
+   *
+   * A real <base href> is not an option: it would re-root every relative URL on
+   * this page (js/writer.js, the menu links, BossScenes/…) onto the CDN. The
+   * document base URL only comes from a <base> with an href *attribute*, so this
+   * one has none — it changes nothing for the page — and answers `.href` with
+   * the community asset root instead, i.e. exactly the streamingAssetsUrl the
+   * page passes anyway. It stays for the life of the page, like upstream's does,
+   * so anything that asks later gets the same answer. */
+  function provideUpstreamBase(assetBase) {
+    if (document.querySelector('base')) return;
+    var href = new URL(String(assetBase || '').replace(/\/*$/, '/'), location.href).href;
+    var base = document.createElement('base');
+    Object.defineProperty(base, 'href', { value: href, enumerable: true, configurable: true });
+    document.head.insertBefore(base, document.head.firstChild);
+    log('community loader <base>: ' + href + ' (no href attribute, so this page keeps its own base URL)');
+  }
+
   async function loadCommunityBuild() {
     var source = COMMUNITY_BUILD;
     if (!source) throw new Error('the community build source was not selected');
@@ -2419,6 +2445,7 @@
     var frameworkUrl = abs(source.unity.framework);
     var streamingAssetsUrl = abs(source.unity.streamingAssets);
     var config = makeUnityConfig(dataUrl, wasmUrl, frameworkUrl, streamingAssetsUrl);
+    provideUpstreamBase(ASSET_BASE);
     var instance = await instantiateUnity(abs(source.unity.loader), config);
     completeUnityBoot(instance, null, null);
   }

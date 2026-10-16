@@ -166,6 +166,7 @@ page can export, import and *install* them:
 | The tab vanishes with no message at all | That is jetsam, and it happens too fast for the page to draw. *Menu ▸ Stability* shows the heap the last session died at. |
 | Black screen after the bar | Check the log panel: `saved file is N bytes, expected M` means the download was cut; reload and it resumes. `the data check` lines say if a chunk is wrong. |
 | `There is not enough free storage` | Free space in *Settings ▸ General ▸ iPad Storage*; the community ZIP alone needs about 1.94 GiB, plus headroom for extracted bundles and Unity. |
+| `null is not an object (evaluating 'document.querySelector('base').href')` right after the archive finishes | The community loader asks the page for a `<base>` element (see [COMMUNITY-BUILD.md](COMMUNITY-BUILD.md#what-the-upstream-loader-expects-from-the-page)); `play.html` now provides one. Reload — the archive is cached (`cache hit:` in the log), so it goes straight to Unity, and the log shows `community loader <base>: …`. |
 | No sound | Tap the screen once — iOS wants a gesture. Then check the log for `audio guard` lines. |
 | Everything is slow | Graphics → Smooth or Low. Auto-degrade does this on its own. |
 | Boss saves missing in the menu | `node web/tools/stage-boss-scenes.mjs` (the roster is not committed twice). |
