@@ -2623,7 +2623,10 @@
     markStage(currentStage);
     setStatus('Downloading the game asset archive — keep Safari open on Wi-Fi');
     var archiveSet = await SKCommunityBuild.ensureArchive(source, {
-      base: ASSET_BASE,
+      // The slimmer archive is published on its own (the build files stay on
+      // the community CDN), so the archive may name its root itself. A mirror
+      // can be forced with ?archiveBase=<url> — see web/COMMUNITY-BUILD.md.
+      base: params.get('archiveBase') || (source.assetArchive && source.assetArchive.base) || ASSET_BASE,
       workerUrl: 'js/writer.js',
       onStatus: function (message) { setStatus('Game assets: ' + message); },
       onPlan: function (plan) {

@@ -460,12 +460,14 @@ await test('the pruned archive and the whole one never get mixed up', async () =
 
 section('the numbers');
 
-await test('the community archive is 1986.6 MB of cutscenes and game data', async () => {
-  // The number the page shows. The pruned archive has to be smaller, or the
-  // whole exercise is pointless.
+await test('the community archive is the slim 1194.1 MB of game data', async () => {
+  // The number the page shows. It has to be smaller than the 1986.6 MB the
+  // upstream archive weighs, or the whole exercise is pointless.
   const source = JSON.parse(fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'community-build.json'), 'utf8'));
-  eq(source.assetArchive.total, 2083139638, 'the whole archive is 1986.6 MB');
-  eq(source.assetArchive.parts.length, 100, 'in 100 shards');
+  eq(source.assetArchive.total, 1252071320, 'the slim archive is 1194.1 MB');
+  eq(source.assetArchive.parts.length, 75, 'in 75 shards');
+  eq(source.assetArchive.total < 2083139638, true, 'and smaller than the archive it replaces');
+  eq(source.assetArchive.slim, true, 'and it says so, so the page skips planning a smaller one');
 });
 
 await fsp.rm(TMP, { recursive: true, force: true });

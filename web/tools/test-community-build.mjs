@@ -17,11 +17,13 @@ section('source descriptor');
 await test('the pinned community source has a consistent resumable archive plan', () => {
   eq(community.validate(source), source, 'valid configuration returned');
   eq(source.commit, 'bcbe014765f2f6ca4b1d82ac25755a0299a600ab', 'source commit pinned');
-  eq(source.assetArchive.parts.length, 100, 'all remote archive shards listed');
-  eq(source.assetArchive.total, 2083139638, 'total size matches shard sizes');
+  eq(source.assetArchive.parts.length, 75, 'all remote archive shards listed');
+  eq(source.assetArchive.total, 1252071320, 'total size matches shard sizes');
   const parts = community.parts(source, 'https://assets.example/game/');
-  eq(parts[0].url, 'https://assets.example/game/StreamingAssets/aa/WebGL.zip.part1', 'first shard resolves at the override base');
-  eq(parts.at(-1).bytes, 17340100, 'last shard size is exact');
+  eq(parts[0].url, 'https://assets.example/game/WebGL.zip.part1', 'first shard resolves at the override base');
+  eq(parts.at(-1).bytes, 10557336, 'last shard size is exact');
+  eq(community.parts(source)[0].url, source.assetArchive.base + 'WebGL.zip.part1', 'the slim archive names its own base');
+  eq(source.assetArchive.total < 1400000000, true, 'the published archive is the slim one, not the 1986.6 MB original');
 });
 
 await test('a descriptor with incorrect archive arithmetic is refused', () => {
@@ -41,7 +43,7 @@ await test('the archive downloader always requires disk-backed storage', async (
   eq(seen.allowMemoryFallback, false, 'a 2 GB archive is never allowed to spill into RAM');
   eq(seen.preferDisk, true, 'OPFS is preferred');
   eq(seen.expectedSize, source.assetArchive.total, 'expected size carried through');
-  eq(seen.parts.length, 100, 'all shards provided to the resumable streamer');
+  eq(seen.parts.length, 75, 'all shards provided to the resumable streamer');
 });
 
 section('ZIP-backed Addressables');

@@ -34,6 +34,11 @@
     if (!archive || !archive.cacheKey || !Array.isArray(archive.parts) || !archive.parts.length) {
       throw fail('community build configuration is missing the StreamingAssets archive parts');
     }
+    // The archive may live somewhere else than the rest of the build (the
+    // slimmer re-published archive does), so it can name its own root.
+    if (archive.base !== undefined && (typeof archive.base !== 'string' || !archive.base)) {
+      throw fail('community build configuration has an invalid asset archive base');
+    }
 
     var total = 0;
     var names = Object.create(null);
@@ -59,9 +64,17 @@
     return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
   }
 
+  /**
+   * Where a part of the archive is. An archive that names its own root wins
+   * over the build's, because the slimmer archive is published on its own.
+   */
+  function archiveBase(config, base) {
+    return base || (config.assetArchive && config.assetArchive.base) || config.base;
+  }
+
   function parts(config, base) {
     validate(config);
-    var root = base || config.base;
+    var root = archiveBase(config, base);
     return config.assetArchive.parts.map(function (part) {
       return { url: join(root, part.path), bytes: part.bytes };
     });
@@ -224,14 +237,16 @@
     validate(config);
     var stream = options.stream || (typeof SKStream !== 'undefined' ? SKStream : null);
     if (!stream || typeof stream.ensureDataset !== 'function') throw fail('the low-memory storage loader did not load');
-    var base = options.base || config.base;
+    var base = archiveBase(config, options.base);
     var archive = config.assetArchive;
     var partList = parts(config, base);
 
     // Work out whether the archive can be made smaller before a single
-    // byte of it is downloaded.
+    // byte of it is downloaded. An archive that says it is already slim has
+    // nothing to leave out, and the plan costs a couple of hundred range
+    // requests, so it is skipped.
     var plan = null;
-    if (options.prune !== false) {
+    if (options.prune !== false && !archive.slim) {
       try {
         plan = await planArchive(partList, Object.assign({}, options, {
           key: config.buildId + ':' + archive.total,
@@ -268,7 +283,7 @@
         writerFactory: options.writerFactory,
         preferDisk: true,
         allowMemoryFallback: false,
-        concurrency: options.concurrency || 4,
+        concurrency: options.concurrency || 6,
         fetchImpl: options.fetchImpl,
         onProgress: options.onProgress,
         onStatus: options.onStatus,
@@ -294,7 +309,7 @@
       preferDisk: true,
       allowMemoryFallback: false,
       // The archive is 100 parts: one at a time is minutes of round trips.
-      concurrency: options.concurrency || 4,
+      concurrency: options.concurrency || 6,
       fetchImpl: options.fetchImpl,
       onProgress: options.onProgress,
       onStatus: options.onStatus,

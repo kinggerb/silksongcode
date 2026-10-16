@@ -17,17 +17,20 @@ maintainer's request, with their stated permission to reuse it.
 
 - Unity loader, framework, data, and wasm files are fetched from the pinned
   source CDN.
-- The Addressables ZIP is split into 100 files totalling exactly
-  `2,083,139,638` bytes (about `1.94 GiB`). The player streams those pieces to
-  Safari's Origin Private File System (OPFS), where downloads can resume after
-  an interruption. Four parts are on the wire at a time — one part at a time
-  means a hundred round trips, which is minutes of waiting on a phone — and
-  each part is written to disk at its own offset as it arrives, so the queue
-  costs a few chunks of RAM rather than a few parts.
-- **Most of that archive is never downloaded.** Before the download starts, the
-  player reads the ZIP's own index (its central directory) with two small byte
-  range requests, works out which files inside it are needed, and then fetches
-  only those — see [The smaller archive](#the-smaller-archive) below.
+- The Addressables ZIP is split into 75 files totalling exactly
+  `1,252,071,320` bytes (about `1.17 GiB`). It is the *slim* rebuild of the
+  upstream archive (see [The slim archive](#the-slim-archive)) and lives in
+  this repository, published under the `slim-assets` tag and served by the
+  CDN. The player streams those pieces to Safari's Origin Private File System
+  (OPFS), where downloads can resume after an interruption. Six parts are on
+  the wire at a time — one part at a time means dozens of round trips, which is
+  minutes of waiting on a phone — and each part is written to disk at its own
+  offset as it arrives, so the queue costs a few chunks of RAM rather than a
+  few parts.
+- **There is nothing left to leave out of it**, so the player skips the
+  planning step entirely (`assetArchive.slim`). The same code path still
+  prunes the upstream archive for anyone who points the descriptor back at it —
+  see [The smaller archive](#the-smaller-archive) below.
 - `zip.js` reads the archive from OPFS and extracts only the bundle Unity asks
   for; the page does not concatenate the ZIP or unpack all bundles in RAM.
 - A cutscene request is answered with a ~600-byte blank container (the same
@@ -37,16 +40,57 @@ maintainer's request, with their stated permission to reuse it.
   spare. The cutscene plays as a black frame.
 
 The first run therefore needs Wi-Fi, a normal (non-Private) Safari tab, and
-roughly 2 GiB of free storage. Leave the tab in the foreground. Later runs reuse
+roughly 1.3 GiB of free storage. Leave the tab in the foreground. Later runs reuse
 the cached archive. If OPFS or the available quota is insufficient, the player
 will explain that rather than trying to put a multi-gigabyte ZIP in RAM.
 
+## The slim archive
+
+The pinned archive is a rebuilt copy of the upstream one: `tools/slim-archive/`
+reads each bundle, edits it **in place** — object rows, offsets and the
+decompressed stream layout never move, so Unity still sees 4.2 million objects
+with the same path ids — and writes the bundles into a new, ordinary ZIP that
+the page reads exactly as before.
+
+| what | how | removed |
+| --- | --- | --- |
+| the 26 cutscene MP4s in `packed-cinematics` | replaced by the same ~600-byte blank MP4 the page already serves for a cutscene, zero-padded to the original length | 224 MB |
+| 85 byte-identical sprite-atlas groups (`sactx-0-8192x4096-BC7-Core` alone ships eleven times) | every copy after the first is emptied out in place: same size, same format, same name, and it renders as one flat colour | 2,789 MB |
+| 6,386 meshes (a 2D game never draws the 3D geometry) | vertex and index blobs zeroed, counts and packing metadata kept, so the mesh still loads | 435 MB |
+| audio (402 MB), the art-collection atlases (1,833 MB, every one unique), animation data | left alone | — |
+
+Bundles: 2,486.5 MB → 1,426.8 MB. ZIP: `2,083,139,638` → `1,252,071,320`
+bytes, i.e. **1986.6 MB → 1194.1 MB**, which is the figure the page shows
+before the first download. The parts are 16 MiB each (75 of them) so that both
+jsDelivr and raw.githubusercontent can serve them.
+
+Rebuilding the archive and re-publishing it are one command each:
+
+```sh
+python3 tools/slim-archive/slim_pipeline.py bundles   # edit the bundles
+python3 tools/slim-archive/slim_pipeline.py zip       # ZIP + parts + hashes
+python3 tools/slim-archive/publish_assets.py --parts-dir <dir> --tag slim-assets
+```
+
+See [`tools/slim-archive/README.md`](tools/slim-archive/README.md) for the
+details, including why the page's own pruning step is skipped for this archive.
+
 ## The smaller archive
 
-The published archive is one 1.94 GiB ZIP, and a good part of it is the
-high-definition cutscenes — the very files the player answers with a
-placeholder instead of the real bytes. Downloading them is an hour on a phone
-and a gigabyte of storage nobody can use.
+> **Measured note (`bcbe0147`):** the checks below skip **0 of the 21 entries**
+> of the upstream build. The archive holds only Addressables bundles — the
+> 43 cutscene MP4s (217 MiB) are *inside* `packed-cinematics`, the audio
+> (402 MiB) inside the four `packed-audio-*` bundles — so nothing matches the
+> video/other-platform rules and the whole 1986.6 MiB is downloaded. The full
+> byte-by-byte breakdown, including 479 MiB of duplicated sprite atlases, is in
+> [`ARCHIVE-SIZE-BREAKDOWN.md`](ARCHIVE-SIZE-BREAKDOWN.md). The pruning path
+> still applies to builds whose videos are separate entries (and to the
+> prepared-build path, where `prepare-build.mjs` replaces loose videos).
+
+The published archive is one 1.94 GiB ZIP, dominated by sprite-atlas textures
+(1.1 GiB of it) and audio (402 MiB), with the 43 cutscene movies at 217 MiB —
+the very files the player answers with a placeholder instead of the real bytes.
+Downloading it is an hour on a phone and a gigabyte of storage nobody can use.
 
 So the player looks before it leaps. A ZIP keeps its index (the *central
 directory*) at the end of the file, and that index says where every file
@@ -85,15 +129,21 @@ out, that the files that are kept come out byte for byte the same, that the
 new archive is smaller, that a download of it can be resumed, and that a CDN
 without byte ranges gets the whole archive instead.
 
-The game payload remains hosted at the pinned external source; it is **not**
-committed under `web/Build/`. This avoids a multi-gigabyte repository and lets
-the existing iPad page continue to handle the files as a low-memory stream. The
-source descriptor contains the exact commit, file sizes, and URLs. Update that
-descriptor together if the upstream build changes. The site requires access to
-the source CDN at runtime.
+The build files (`Build/*.unityweb`, the loose StreamingAssets) remain hosted at
+the pinned external source; they are **not** committed under `web/Build/`. The
+trimmed archive is published from this repository instead, as blobs under the
+`slim-assets` tag — never as working-tree files, so no clone has to carry it —
+and `assetArchive.base` pins the CDN URL that serves them. A published payload
+does make the repository larger on GitHub's side (about 1.2 GB of history); drop
+the tag with `git push origin :refs/tags/slim-assets` if that is ever unwanted.
+The source descriptor contains the exact commit, file sizes, and URLs. Update
+that descriptor together if the upstream build changes. The site requires
+access to the archive CDN at runtime.
 
 To disable this fallback and use only a prepared local/CDN build, add
-`?community=0` to the play URL. To point this community build at a mirror, use
+`?community=0` to the play URL. To force a different home for the *archive*
+only (for example the raw.githubusercontent mirror recorded as
+`assetArchive.mirror`), add `?archiveBase=https://host/path/`. To point this community build at a mirror, use
 `?communityBase=https://your-host/path/` (the mirror must preserve the source
 paths and serve the Unity `.unityweb` files and split ZIP parts unchanged).
 
