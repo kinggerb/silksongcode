@@ -9,9 +9,10 @@ full CDN download and real iPad Safari behavior still need device testing.
 > **Read this first:** the repository does not contain Silksong's original
 > Unity project. The play page now uses a pinned community WebGL build source by
 > default when no prepared local build is present. Its first run downloads the
-> Addressables data into OPFS — the published archive is 1.94 GiB, of which the
-> cutscenes and any other platform's bundles are left out, so the download and
-> the file on the device are both smaller; see
+> Addressables data into OPFS — the pinned archive is 1194.1 MB, already slimmed
+> by removing the duplicated atlases, the cutscene videos and the mesh data a 2D
+> build never draws, so the download and the file on the device are both
+> smaller; see
 > [COMMUNITY-BUILD.md](COMMUNITY-BUILD.md) for the source, storage requirements,
 > and limitations. `demo.html` remains a small loader test that does not download
 > or pretend to contain the game.
@@ -69,10 +70,10 @@ prints them.
 Open the project URL in Safari on the iPad and tap **Start**. With the default
 community source, the first run streams the addressable assets to OPFS and may
 take a long time; use Wi-Fi, keep Safari in the foreground, and make sure the
-device has enough free storage. The player reads the archive's own index first
-and leaves the cutscenes out, so the download is smaller than the published
-1.94 GiB — the page says how much once it knows. Later runs use the cached
-archive.
+device has enough free storage. The pinned archive is already 1194.1 MB — the
+cutscenes, duplicated atlases and mesh data are gone — so that is what comes
+down the wire; the page says how much it is streaming as it goes. Later runs use
+the cached archive.
 The compressed Unity entry points remain on the pinned source CDN. Add the page
 to the home screen (*Share ▸ Add to Home Screen*) if you want Safari to retain
 the origin's cache longer.
@@ -204,7 +205,7 @@ page can export, import and *install* them:
 | Tab disappears during "Loading into memory" | Retry (the data is cached, so it skips the download) and lower the render scale. |
 | The tab vanishes with no message at all | That is jetsam, and it happens too fast for the page to draw. *Menu ▸ Stability* shows the heap the last session died at. |
 | Black screen after the bar | Check the log panel: `saved file is N bytes, expected M` means the download was cut; reload and it resumes. `the data check` lines say if a chunk is wrong. |
-| `There is not enough free storage` | Free space in *Settings ▸ General ▸ iPad Storage*; the community ZIP alone needs about 1.94 GiB (less once the cutscenes are left out), plus headroom for extracted bundles and Unity. |
+| `There is not enough free storage` | Free space in *Settings ▸ General ▸ iPad Storage*; the community ZIP alone needs about 1194.1 MB, plus headroom for extracted bundles and Unity. |
 | `null is not an object (evaluating 'document.querySelector('base').href')` right after the archive finishes | The community loader asks the page for a `<base>` element (see [COMMUNITY-BUILD.md](COMMUNITY-BUILD.md#what-the-upstream-loader-expects-from-the-page)); `play.html` now provides one. Reload — the archive is cached (`cache hit:` in the log), so it goes straight to Unity, and the log shows `community loader <base>: …`. |
 | No sound | Tap the screen once — iOS wants a gesture. Then check the log for `audio guard` lines. |
 | Everything is slow | Graphics → Smooth or Low. Auto-degrade does this on its own. |

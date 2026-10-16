@@ -2,10 +2,14 @@
  * zip-plan.js — read a remote ZIP's index and plan a smaller copy of it
  * ----------------------------------------------------------------------------
  * The problem
- *   The community build ships its Addressables as one 1.94 GiB ZIP, split
- *   into 100 files. Downloading all of it is 1986.6 MB on the wire and the
- *   same again on the device, and a good part of it is the high-definition
- *   cutscenes — the one thing in the archive a phone can never hold.
+ *   The upstream community build shipped its Addressables as one 1.94 GiB
+ *   ZIP, split into 100 files: 1986.6 MB on the wire and the same again on
+ *   the device, and a good part of it was the high-definition cutscenes — the
+ *   one thing in the archive a phone can never hold. The pinned archive is
+ *   now the slimmed 1194.1 MB / 75 parts and says so (`assetArchive.slim`), so
+ *   this path is skipped for it; it is what keeps a build that is *not*
+ *   slimmed — or one whose videos and other platforms are separate entries —
+ *   from paying for files the player never reads.
  *
  * What this module does
  *   A ZIP is a sequence of *local records* (a header plus the compressed

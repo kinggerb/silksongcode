@@ -718,7 +718,7 @@
    *
    * Several parts are on the wire at the same time (see DEFAULT_CONCURRENCY):
    * one part at a time spends most of the download waiting for the next
-   * round trip, and the community build is 100 parts. The parts are *not*
+   * round trip, and the community build is 75 parts. The parts are *not*
    * buffered — each one is written to the sink at its own offset as its
    * chunks arrive, so only the chunks that happen to be in flight are ever
    * in memory.
