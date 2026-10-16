@@ -41,11 +41,11 @@ just train --timesteps 200000 --run-name moss-mother-a
 
 ## 网页版 (iPad Safari)
 
-`web/` 是把游戏放进 iPad 浏览器的移植层. 准备版构建会把数据分块流式写进设备 OPFS，再交给
-Unity；默认社区构建则把 Addressables ZIP 分片缓存到 OPFS，按需提取资源。两条路径都避免在内存里
-拼装多 GiB 文件，并会复用已缓存的数据。另外还有画质档位 (100 % → 25 % 渲染分辨率 + 帧率上限 + 自动降档), 崩溃
-阶梯 (上次被系统杀掉就下次自动降一档), 硬性内存上限, 音频守卫, 以及把过场视频换成几百
-字节的黑屏占位 (构建时替换, 顺带瘦身几百 MB).
+`web/` 是把游戏放进 iPad 浏览器的移植层。默认社区构建现在按需下载 ZIP 分片到 OPFS，
+不再等完整的 1.25 GB 归档下载完才启动 Unity；已下载分片和已提取资源会复用。
+加载器还修复了缓存被探测器清空、并发断点续传和 worker 退出超时，并将 Wasm 流式编译与资源准备并行。
+完整实现、回退开关和测试结果见 [web/LOADING-OPTIMIZATIONS.md](web/LOADING-OPTIMIZATIONS.md)。
+三分钟内进入可操作游戏仍需目标 iPad 实测，不把小型测试结果当作完整游戏性能承诺。
 
 ```shell
 cd web
@@ -57,8 +57,8 @@ node tools/make-fixture-build.mjs   # 造一份假构建, 用 demo.html 验证�
 ```
 
 页面默认使用 `web/community-build.json` 中固定版本的社区 WebGL 构建。游戏文件不会被复制进本仓库：
-Unity 入口文件从构建源 CDN 加载，约 1.94 GiB 的 Addressables 分片会在首次启动时流式写入 iPad 的 OPFS，
-之后由 `zip.js` 按需读取资源。首次启动需要 Wi-Fi、普通 Safari 浏览标签页和约 2 GiB 可用存储；
+Unity 入口文件从构建源 CDN 加载，完整 Addressables 归档为约 1.17 GiB；首次启动只下载所需资源覆盖的分片，
+之后随游戏进程继续缓存。建议 Wi-Fi、普通 Safari 标签页和至少约 2 GiB 可用存储（包括提取缓存）；
 具体来源、版本和限制见 `web/COMMUNITY-BUILD.md`。如果有本地或自托管的标准 Unity WebGL 构建，
 `web/play.html` 会优先使用它；准备与校验方法见 `web/BUILD.md`，实机使用与画质档位见 `web/IPAD.md`.
 

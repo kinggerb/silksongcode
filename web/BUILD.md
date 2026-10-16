@@ -18,7 +18,9 @@ uses a prepared `web/Build/build-manifest.json` when one is present. If not, it
 uses the pinned community WebGL source in `web/community-build.json`: Unity's
 small compressed entry points are loaded from that source, and its 1194.1 MB
 Addressables payload (one 1194.1 MB ZIP in 75 parts) is streamed into OPFS and read
-bundle-by-bundle. The
+bundle-by-bundle on demand, without waiting for the whole archive. See
+[LOADING-OPTIMIZATIONS.md](LOADING-OPTIMIZATIONS.md) for native compilation,
+alternate packaging/hosting and the performance test plan. The
 game payload is not copied into this Git repository. See
 [`COMMUNITY-BUILD.md`](COMMUNITY-BUILD.md) for storage, network, and source
 notes. `?community=0` disables this fallback; with no local build, the page then

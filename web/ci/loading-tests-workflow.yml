@@ -1,0 +1,41 @@
+name: Web loading tests
+
+on:
+  pull_request:
+    paths: ['web/**', '.github/workflows/web-tests.yml']
+  push:
+    branches: [main]
+    paths: ['web/**', '.github/workflows/web-tests.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  loading:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+        working-directory: web
+      - run: npm test
+        working-directory: web
+      - name: Get the exact pinned loader for the synthetic browser integration
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api 'repos/web-ports/hollow-knight-silksong/contents/Build/w-pt.loader.js?ref=bcbe014765f2f6ca4b1d82ac25755a0299a600ab' \
+            -H 'Accept: application/vnd.github.raw+json' > "$RUNNER_TEMP/unity-test.loader.js"
+      - name: Test real browser OPFS, streaming and loading fallbacks
+        working-directory: web
+        env:
+          PINNED_LOADER_PATH: ${{ runner.temp }}/unity-test.loader.js
+        run: |
+          export CHROME_BIN="$(command -v google-chrome || command -v chromium)"
+          npm run test:browser

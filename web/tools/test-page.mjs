@@ -32,7 +32,7 @@ try {
  * ---------------------------------------------------------------- */
 
 const html = fs.readFileSync(path.join(WEB, 'play.html'), 'utf8');
-const libs = ['js/stream.js', 'js/manifest.js', 'js/zip-plan.js', 'js/community-build.js', 'js/save-codec.js', 'js/boss-scenes.js'].map((rel) =>
+const libs = ['js/stream.js', 'js/manifest.js', 'js/zip-plan.js', 'js/asset-cache.js', 'js/community-build.js', 'js/unity-startup.js', 'js/save-codec.js', 'js/boss-scenes.js'].map((rel) =>
   fs.readFileSync(path.join(WEB, ...rel.split('/')), 'utf8')
 );
 // The inline script is what runs the game page: pull it out so the libraries can
@@ -331,6 +331,7 @@ await test('the community loader finds the <base> it was written for, and the pa
   win.SKStream.detect = async () => ({ opfs: true, available: 4e9, quota: 5e9, usage: 0, secure: true });
   win.SKCommunityBuild.ensureArchive = async () => ({ file: new win.Blob(['zip']), dispose() {} });
   win.SKCommunityBuild.openArchive = async () => ({ entryCount: 1, entryFor: () => null, blobFor: async () => null, close() {} });
+  win.SKCommunityBuild.openLazyArchive = win.SKCommunityBuild.openArchive;
   // jsdom does not fetch <script src>, so run the loader when the page appends it.
   const loaderUrl = source.base + source.unity.loader;
   const append = win.document.body.appendChild.bind(win.document.body);

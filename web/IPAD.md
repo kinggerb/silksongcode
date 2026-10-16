@@ -37,17 +37,21 @@ The Hollow Knight port hit precisely this wall at 926 MB.
 
 ## 2. What this port does instead
 
+Current loading changes, controls and validation are documented in
+[LOADING-OPTIMIZATIONS.md](LOADING-OPTIMIZATIONS.md). The default is lazy loading;
+`?assets=eager` opts back into the full-archive path.
+
 | Step | How | Effect |
 | --- | --- | --- |
-| Download | every chunk is streamed straight into the **Origin Private File System** through a worker (`FileSystemSyncAccessHandle`), four chunks in flight at a time | peak RAM during download: a few MB, not GB. `js/writer.js`, `js/stream.js` |
+| Download | every chunk is streamed straight into the **Origin Private File System** through a worker (`FileSystemSyncAccessHandle`), up to six requested archive parts in flight (configurable 1–8) | peak RAM during download: a few MB, not GB. `js/writer.js`, `js/stream.js` |
 | Second visit | prepared files and the community Addressables archive stay in OPFS, keyed by build id | completed data is reused; interrupted downloads resume |
-| Addressables | the community ZIP is indexed from its OPFS `File`; `zip.js` extracts only requested bundles | no 2 GB `ArrayBuffer`, and no eager unpack of every bundle |
-| The archive itself | the ZIP's index is read with two small range requests, and the cutscenes are left out of the download and of the file on the device | a few hundred megabytes less to download and to keep |
+| Addressables | the community ZIP is indexed through cached on-demand parts; `zip.js` extracts only requested bundles | no 2 GB `ArrayBuffer`, and no eager unpack of every bundle |
+| The archive itself | the pinned ZIP is already slim; only parts covering requested content download before boot | unused bundles no longer block startup |
 | Cutscenes | a cutscene request is answered with a ~600-byte blank container instead of the real video (`js/community-build.js`) | a high-definition cutscene never has to fit in RAM |
 | Hand-off | a prepared build gives Unity one file-backed blob URL; the community build uses Unity's compressed CDN entry points | avoids concatenating multi-gigabyte assets in page memory |
 | Verification | prepared builds probe chunk sizes and sample digests; the community source uses pinned commit IDs, exact ZIP-part sizes and a ZIP directory check | stale or truncated files fail before Unity uses them |
 | Data | prepared builds can replace cutscenes with ~600-byte black placeholders and omit junk (`prepare-build.mjs`) | reduces the prepared build's download and storage footprint |
-| Memory | a 1 GB wasm heap ceiling, a 16 MB starting heap, a render-scale ladder (100 % → 25 %), a frame cap, auto-degrade and a crash ladder | the tab stays under the ceiling instead of being killed |
+| Memory | render-scale ladder, frame cap, pressure checks, auto-degrade and crash ladder | reduces rendering/pressure; compiled engine memory limits still require a compatible rebuild |
 | Memory | the collector runs every minute, and four times a minute once the heap passes 900 MB | the heap never creeps towards the ceiling |
 | Audio | a guard relabels iOS's `NotSupportedError` on `play()` as `NotAllowedError`, which is the error Unity waits out | sound starting late no longer kills the game |
 | Room audio | the framework's `disconnectSource` drops the `<audio>` source (`tools/patches.mjs`), and the page sweeps the elements nobody is using | WebKit frees each room's music decoder |
@@ -71,9 +75,9 @@ Open the project URL in Safari on the iPad and tap **Start**. With the default
 community source, the first run streams the addressable assets to OPFS and may
 take a long time; use Wi-Fi, keep Safari in the foreground, and make sure the
 device has enough free storage. The pinned archive is already 1194.1 MB — the
-cutscenes, duplicated atlases and mesh data are gone — so that is what comes
-down the wire; the page says how much it is streaming as it goes. Later runs use
-the cached archive.
+cutscenes, duplicated atlases and mesh data were already slimmed. Only requested
+parts download before boot; more may download as you play. Later runs reuse
+cached parts and extracted bundles.
 The compressed Unity entry points remain on the pinned source CDN. Add the page
 to the home screen (*Share ▸ Add to Home Screen*) if you want Safari to retain
 the origin's cache longer.
@@ -88,7 +92,7 @@ and Unity's stream compilation.
   and wasm chunks) are written to OPFS as they arrive. The community build's
   compressed Unity files are fetched from the pinned CDN. Unity then loads its
   runtime memory ("Loading into memory — x %"); keep the tab in the foreground.
-* **Later runs** — the large community ZIP is reused from OPFS. Prepared-build
+* **Later runs** — community ZIP parts/extracted bundles are reused from OPFS. Prepared-build
   chunks use sampled digest verification; community ZIP parts use exact sizes
   and a pinned source commit.
 * **Graphics** — iPads and phones start at **Low** (55 % render scale, 30 fps

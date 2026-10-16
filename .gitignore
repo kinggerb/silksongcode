@@ -24,3 +24,6 @@ __pycache__/
 /web/.fixture-build/
 /web/BossScenes/
 /web/*.log
+
+# Generated alternate game packages (never commit multi-GB assets)
+/web/optimized-assets/

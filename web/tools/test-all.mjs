@@ -14,6 +14,8 @@ const skipDom = process.argv.includes('--no-dom');
 
 const suites = [
   ['stream loader', 'test-stream.mjs'],
+  ['asset delivery and packaging', 'test-asset-delivery.mjs'],
+  ['loading performance regressions', 'test-loading-performance.mjs'],
   ['build manifest', 'test-manifest.mjs'],
   ['community build adapter', 'test-community-build.mjs'],
   ['the smaller archive', 'test-zip-plan.mjs'],

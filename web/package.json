@@ -16,9 +16,12 @@
     "test:webdata": "node tools/test-webdata.mjs",
     "test:save-codec": "node tools/test-save-codec.mjs",
     "test:pipeline": "node tools/test-pipeline.mjs",
-    "test:page": "node tools/test-page.mjs"
+    "test:page": "node tools/test-page.mjs",
+    "test:browser": "node tools/test-browser.mjs",
+    "test:performance": "node tools/test-loading-performance.mjs"
   },
   "devDependencies": {
-    "jsdom": "^30.1.2"
+    "jsdom": "^30.1.2",
+    "playwright-core": "^1.64.1"
   }
 }

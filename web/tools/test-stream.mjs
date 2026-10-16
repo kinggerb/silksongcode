@@ -784,7 +784,7 @@ await test('a complete file with a matching marker is used without any download'
   server.stop();
 });
 
-await test('an interrupted download resumes from the byte it reached', async () => {
+await test('legacy partial downloads are rebuilt rather than trusting sparse length', async () => {
   const dir = path.join(TMP, 'resume');
   await fsp.mkdir(dir, { recursive: true });
   const { parts, expected } = writeChunks(dir, 4, 256);
@@ -804,7 +804,7 @@ await test('an interrupted download resumes from the byte it reached', async () 
   });
   eq(set.size, expected.length, 'assembled size after resume');
   ok(sink.buffer.equals(expected), 'the resumed file is byte-exact');
-  ok(logs.some((l) => /resuming download at/.test(l)), 'the log says it resumed: ' + logs.join(' | '));
+  ok(!logs.some((l) => /resuming download at/.test(l)), 'unsafe legacy partial files are not resumed by size');
   server.stop();
 });
 
