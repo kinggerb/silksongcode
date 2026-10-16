@@ -20,8 +20,10 @@ maintainer's request, with their stated permission to reuse it.
 - The Addressables ZIP is split into 75 files totalling exactly
   `1,252,071,320` bytes (about `1.17 GiB`). It is the *slim* rebuild of the
   upstream archive (see [The slim archive](#the-slim-archive)) and lives in
-  this repository, published under the `slim-assets` tag and served by the
-  CDN. The player streams those pieces to Safari's Origin Private File System
+  this repository, published under the `slim-assets` tag and served by
+  `raw.githubusercontent.com`, with jsDelivr recorded as a mirror (see [Two
+  hosts for the archive parts](#two-hosts-for-the-archive-parts)). The player
+  streams those pieces to Safari's Origin Private File System
   (OPFS), where downloads can resume after an interruption. Six parts are on
   the wire at a time — one part at a time means dozens of round trips, which is
   minutes of waiting on a phone — and each part is written to disk at its own
@@ -61,8 +63,10 @@ the page reads exactly as before.
 
 Bundles: 2,486.5 MB → 1,426.8 MB. ZIP: `2,083,139,638` → `1,252,071,320`
 bytes, i.e. **1986.6 MB → 1194.1 MB**, which is the figure the page shows
-before the first download. The parts are 16 MiB each (75 of them) so that both
-jsDelivr and raw.githubusercontent can serve them.
+before the first download. The parts are 16 MiB each (75 of them) so that
+`raw.githubusercontent.com` can serve them, whose limit is 100 MB per blob.
+jsDelivr's limit is on the *package* rather than the part, and 1.19 GB is over
+it — see [Two hosts for the archive parts](#two-hosts-for-the-archive-parts).
 
 Rebuilding the archive and re-publishing it are one command each:
 
@@ -136,22 +140,59 @@ The build files (`Build/*.unityweb`, the loose StreamingAssets) remain hosted at
 the pinned external source; they are **not** committed under `web/Build/`. The
 trimmed archive is published from this repository instead, as blobs under the
 `slim-assets` tag — never as working-tree files, so no clone has to carry it —
-and `assetArchive.base` pins the CDN URL that serves them. A published payload
+and `assetArchive.base` pins the raw.githubusercontent.com URL that serves
+them, with `assetArchive.mirror` recording the jsDelivr one. A published payload
 does make the repository larger on GitHub's side (about 1.2 GB of history); drop
 the tag with `git push origin :refs/tags/slim-assets` if that is ever unwanted.
 The source descriptor contains the exact commit, file sizes, and URLs. Update
 that descriptor together if the upstream build changes. The site requires
-access to the archive CDN at runtime.
+access to the archive host at runtime.
 
 To disable this fallback and use only a prepared local/CDN build, add
 `?community=0` to the play URL. To force a different home for the *archive*
-only (for example the raw.githubusercontent mirror recorded as
-`assetArchive.mirror`), add `?archiveBase=https://host/path/`. To point this community build at a mirror, use
+only (for example the jsDelivr mirror recorded as `assetArchive.mirror`), add
+`?archiveBase=https://host/path/`. To point this community build at a mirror, use
 `?communityBase=https://your-host/path/` (the mirror must preserve the source
 paths and serve the Unity `.unityweb` files and split ZIP parts unchanged).
 
 `zip.js` is distributed under the BSD 3-Clause license; the license notice is
 in [`js/zip-LICENSE.txt`](js/zip-LICENSE.txt).
+
+## Two hosts for the archive parts
+
+The parts are published once, and two hosts serve them — but not equally:
+
+| host | recorded as | the limit that matters |
+| --- | --- | --- |
+| `raw.githubusercontent.com` | `assetArchive.base` | serves any committed blob under 100 MB, and a part is 16 MiB, so every part is served |
+| `cdn.jsdelivr.net` | `assetArchive.mirror` | refuses a GitHub *package* larger than 150 MB, and this one is ~1.19 GB |
+
+jsDelivr's refusal is per request rather than per package, and only for the
+parts it has not already stored — so a download did not fail at the start. It
+got as far as the first part jsDelivr had not cached and died there:
+
+```
+HTTP 403 for https://cdn.jsdelivr.net/gh/kinggerb/silksongcode@<pin>/parts/WebGL.zip.part6
+```
+
+six parts into seventy-five, with `Package size exceeded the configured limit
+of 150 MB` in the body. The archive bytes were never the problem, and nothing
+had to be rebuilt or re-published: only the order of the two hosts did.
+
+So `assetArchive.base` is GitHub raw, and `assetArchive.mirror` is jsDelivr —
+the host that always answers leads, and the CDN that is quicker *when* it
+answers is the fallback. Both are pinned to the publish commit rather than to
+the `slim-assets` tag, which can move.
+
+`js/community-build.js` wraps the fetch the downloader uses (`mirrorFetch`) so
+that a part which is refused — 403, 404, 408, 429 or any 5xx — or whose host
+cannot be reached at all is asked for **once** more from the mirror, at the
+same path and with the same request, byte ranges included. Two rules keep that
+safe: only a URL under the archive's own root is ever rewritten, and a URL that
+is already on the mirror is never mirrored, so a download cannot ping-pong
+between two hosts that are both refusing it. Both `stream.ensureDataset` calls
+and the archive plan read through that one wrapper;
+`tools/test-community-build.mjs` pins all of it.
 
 ## What the upstream loader expects from the page
 

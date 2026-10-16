@@ -36,7 +36,9 @@ still resolves and the bundle stays valid. Only bytes inside the stream change.
    435 MB.
 4. **The ZIP.** Bundles are written back with LZ4 blocks (the container the
    player expects) and deflated into one ZIP, split into 16 MiB parts —
-   small enough for both jsDelivr and raw.githubusercontent to serve.
+   small enough for `raw.githubusercontent.com` to serve, whose limit is
+   100 MB per blob. jsDelivr's limit is on the *package*, not the part, and
+   1.19 GB is over it.
 
 Measured result: bundles 2,486.5 MB → 1,426.8 MB, ZIP `2,083,139,638` →
 `1,252,071,320` bytes, in 75 parts. Left alone on purpose: audio (402 MB), the
@@ -77,10 +79,22 @@ https://raw.githubusercontent.com/kinggerb/silksongcode/slim-assets/parts/
 https://cdn.jsdelivr.net/gh/kinggerb/silksongcode@<commit>/parts/
 ```
 
-`community-build.json` keeps the jsDelivr URL (the CDN the build files already
-use, and CORS is known to work there) pinned to the publish commit, and records
-the raw mirror. The page can be pointed at either with
-`?archiveBase=https://host/path/`.
+`community-build.json` keeps the **raw.githubusercontent** URL as
+`assetArchive.base` and records the jsDelivr one as `assetArchive.mirror`, both
+pinned to the publish *commit* rather than to the tag, which can move.
+
+That order used to be the other way round, on the theory that the CDN the build
+files already use was the safer host and CORS is known to work there. It is not:
+jsDelivr refuses a GitHub *package* larger than 150 MB, and this one is
+~1.19 GB, so it answers `403 Package size exceeded the configured limit of 150
+MB` for every part it has not already cached — a download reached part 6 of 75
+and stopped there. raw.githubusercontent.com serves any committed blob under
+100 MB and a part is 16 MiB, so it always answers; jsDelivr is still worth
+keeping as the mirror for the parts it does serve. `js/community-build.js`
+retries a refused or unreachable part once against the mirror (`mirrorFetch`),
+so either host can lead, and swapping the two is a descriptor-only change —
+nothing has to be rebuilt or re-published. The page can be pointed at either by
+hand with `?archiveBase=https://host/path/`.
 
 ## What the page does differently
 
@@ -88,4 +102,6 @@ the raw mirror. The page can be pointed at either with
 left to leave out, so it skips the plan step (a couple of hundred range
 requests) and downloads the parts directly, six at a time. The cutscene bypass
 in the fetch mount stays as a safety net for any video path that is not in the
-archive.
+archive. The download itself runs through `mirrorFetch`, which asks
+`assetArchive.mirror` once for any part the base refuses (403/404/408/429/5xx)
+or cannot be reached for.

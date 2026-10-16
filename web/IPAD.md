@@ -206,6 +206,7 @@ page can export, import and *install* them:
 | The tab vanishes with no message at all | That is jetsam, and it happens too fast for the page to draw. *Menu ▸ Stability* shows the heap the last session died at. |
 | Black screen after the bar | Check the log panel: `saved file is N bytes, expected M` means the download was cut; reload and it resumes. `the data check` lines say if a chunk is wrong. |
 | `There is not enough free storage` | Free space in *Settings ▸ General ▸ iPad Storage*; the community ZIP alone needs about 1194.1 MB, plus headroom for extracted bundles and Unity. |
+| Loading stops with `HTTP 403 for https://cdn.jsdelivr.net/…/parts/WebGL.zip.partN` | jsDelivr refusing a GitHub *package* over its 150 MB limit — the archive is ~1.19 GB. It refuses only the parts it has not already cached, which is why the download gets a few parts in first. The descriptor serves the parts from `raw.githubusercontent.com` now and keeps jsDelivr only as a mirror, and a refused part is retried once against that mirror; reload and the download resumes where it stopped. See [COMMUNITY-BUILD.md](COMMUNITY-BUILD.md#two-hosts-for-the-archive-parts). |
 | `null is not an object (evaluating 'document.querySelector('base').href')` right after the archive finishes | The community loader asks the page for a `<base>` element (see [COMMUNITY-BUILD.md](COMMUNITY-BUILD.md#what-the-upstream-loader-expects-from-the-page)); `play.html` now provides one. Reload — the archive is cached (`cache hit:` in the log), so it goes straight to Unity, and the log shows `community loader <base>: …`. |
 | No sound | Tap the screen once — iOS wants a gesture. Then check the log for `audio guard` lines. |
 | Everything is slow | Graphics → Smooth or Low. Auto-degrade does this on its own. |
@@ -244,7 +245,10 @@ downloading 2 GiB, but a cross-origin CDN is allowed to put a transfer encoding
 on the answer. Then `Content-Length` describes the *encoded* body while
 `response.body` yields *decoded* bytes, and `Content-Encoding` is not a
 CORS-safelisted header — the page cannot even read it to tell the two apart. The
-community build streams from jsDelivr, so a compressed part aborted a perfectly
+community build streamed from jsDelivr then — the parts come from GitHub raw
+now, with jsDelivr as the mirror; see
+[COMMUNITY-BUILD.md](COMMUNITY-BUILD.md#two-hosts-for-the-archive-parts) — so a
+compressed part aborted a perfectly
 good download with `part N is X bytes on the server but Y in the manifest —
 rebuild or re-run prepare-build.mjs`, which the page also treats as permanent, so
 there was no retry. `js/stream.js` now trusts the header only when it claims
@@ -286,7 +290,9 @@ A fourth one, and a correction to the second: "trust `Content-Length` when it
 claims *more* than the manifest, compression cannot do that" is wrong. A content
 coding only shrinks data that compresses; on incompressible data it just adds its
 own framing, and every ZIP part of the community build is incompressible.
-jsDelivr's edge content-codes them anyway, so the wire body comes out up to ~45
+jsDelivr's edge content-codes them anyway (it is the archive's mirror rather
+than its base now, and it still codes what it serves), so the wire body comes
+out up to ~45
 bytes *larger* than the file: part 1, correctly 20866662 bytes in the manifest,
 is announced as 20866707, and loaders 1.0.1–1.0.2 refused it before its first
 byte with `part 1 is 20866707 bytes on the server but only 20866662 in the
