@@ -16,8 +16,9 @@ project homepage to `web/play.html` while preserving the query and hash, and the
 root `.nojekyll` file prevents Jekyll from transforming the site. The page first
 uses a prepared `web/Build/build-manifest.json` when one is present. If not, it
 uses the pinned community WebGL source in `web/community-build.json`: Unity's
-small compressed entry points are loaded from that source, and its roughly
-1.94 GiB Addressables ZIP is streamed into OPFS and read bundle-by-bundle. The
+small compressed entry points are loaded from that source, and its 1194.1 MB
+Addressables payload (one 1194.1 MB ZIP in 75 parts) is streamed into OPFS and read
+bundle-by-bundle. The
 game payload is not copied into this Git repository. See
 [`COMMUNITY-BUILD.md`](COMMUNITY-BUILD.md) for storage, network, and source
 notes. `?community=0` disables this fallback; with no local build, the page then

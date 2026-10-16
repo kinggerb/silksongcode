@@ -1,9 +1,10 @@
 /* ============================================================================
  * community-build.js — stream and mount the permitted community WebGL build
  * ----------------------------------------------------------------------------
- * The upstream build stores its Addressables in a 2.08 GB ZIP split into
- * 100 files. Keep that archive on OPFS and read individual bundles from it
- * with zip.js; do not concatenate the pieces in RAM or unpack the whole archive.
+ * The pinned community archive stores its Addressables in one 1.17 GiB ZIP
+ * split into 75 files (the upstream it was rebuilt from was 2.08 GB in 100).
+ * Keep that archive on OPFS and read individual bundles from it with zip.js;
+ * do not concatenate the pieces in RAM or unpack the whole archive.
  * ==========================================================================*/
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) {
@@ -86,7 +87,9 @@
    * The upstream archive is one 1.94 GiB ZIP, and a good part of it is
    * the high-definition cutscenes — the very files the page answers with
    * a placeholder instead of the real bytes. Downloading them is a waste
-   * of an hour on a phone and a gigabyte of storage nobody can use.
+   * of an hour on a phone and a gigabyte of storage nobody can use. (The
+   * pinned archive has already been slimmed, so what is left of this is
+   * the placeholder itself, plus the path for archives that have not.)
    *
    * So before the download starts, the archive is asked for its index:
    * two small range requests read the ZIP's central directory, which
@@ -308,7 +311,7 @@
       writerFactory: options.writerFactory,
       preferDisk: true,
       allowMemoryFallback: false,
-      // The archive is 100 parts: one at a time is minutes of round trips.
+      // The archive is 75 parts: one at a time is minutes of round trips.
       concurrency: options.concurrency || 6,
       fetchImpl: options.fetchImpl,
       onProgress: options.onProgress,

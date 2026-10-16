@@ -87,12 +87,15 @@ details, including why the page's own pruning step is skipped for this archive.
 > still applies to builds whose videos are separate entries (and to the
 > prepared-build path, where `prepare-build.mjs` replaces loose videos).
 
-The published archive is one 1.94 GiB ZIP, dominated by sprite-atlas textures
-(1.1 GiB of it) and audio (402 MiB), with the 43 cutscene movies at 217 MiB —
-the very files the player answers with a placeholder instead of the real bytes.
-Downloading it is an hour on a phone and a gigabyte of storage nobody can use.
+The pinned archive is one 1194.1 MB ZIP of game data in 75 parts, dominated by
+sprite-atlas textures (the 2,789 MB of duplicated atlases are already gone) and
+audio (402 MiB); its 43 cutscene movies are 600-byte blanks inside
+`packed-cinematics`. There is nothing left for the planning path below to leave
+out of *this* archive — it says so (`assetArchive.slim`) and the page skips the
+check — but it is still what stops a build that ships its videos and other
+platforms as separate entries from paying for files the player never reads.
 
-So the player looks before it leaps. A ZIP keeps its index (the *central
+For such a build the player looks before it leaps. A ZIP keeps its index (the *central
 directory*) at the end of the file, and that index says where every file
 inside it lives. Two small range requests — the last 64 KB and the directory
 itself — are enough to read it, and they cost a few hundred kilobytes instead
