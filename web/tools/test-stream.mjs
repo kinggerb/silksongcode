@@ -811,5 +811,130 @@ await test('the in-memory fallback still produces a usable blob when there is no
   server.stop();
 });
 
+section('the concurrent download');
+
+await test('several parts are on the wire at the same time', async () => {
+  // The community build is 100 parts and one part at a time means 100
+  // round trips: the queue fetches a few of them at once and writes each
+  // one at its own offset.
+  const dir = path.join(TMP, 'parallel');
+  await fsp.mkdir(dir, { recursive: true });
+  const { parts, expected } = writeChunks(dir, 12, 4096);
+  const server = await serveDir(dir);
+
+  let inFlight = 0;
+  let peak = 0;
+  const started = [];
+  const fetchImpl = async (url) => {
+    inFlight++;
+    peak = Math.max(peak, inFlight);
+    started.push(String(url));
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    const file = path.join(dir, path.basename(new URL(String(url)).pathname));
+    const body = await fsp.readFile(file);
+    inFlight--;
+    return {
+      ok: true,
+      status: 200,
+      headers: new Map([['content-length', String(body.length)]]),
+      body: {
+        getReader() {
+          let sent = false;
+          return {
+            async read() {
+              if (sent) return { done: true, value: undefined };
+              sent = true;
+              return { done: false, value: new Uint8Array(body) };
+            },
+            async cancel() {},
+          };
+        },
+      },
+    };
+  };
+
+  const sink = new FakeOpfsSink({ name: 'parallel.bin' });
+  await run({
+    sink,
+    ensure: {
+      parts: parts.map((p) => ({ url: server.url + p.url, bytes: p.bytes })),
+      expectedSize: expected.length,
+      cacheKey: 'parallel.bin',
+      buildId: 'b',
+      fetchImpl,
+    },
+  });
+
+  ok(peak > 1, 'more than one part was fetched at once (peak ' + peak + ')');
+  ok(peak <= 4, 'and never more than the four the queue is allowed (peak ' + peak + ')');
+  eq(started.length, 12, 'every part was fetched');
+  ok(sink.buffer.equals(expected), 'the parts still land in the right places');
+  server.stop();
+});
+
+await test('a resumed download still lands in the right places', async () => {
+  // The queue and the resume have to work together: the part that was cut
+  // in half is finished, the parts behind it are fetched in parallel and
+  // written at their own offsets.
+  const dir = path.join(TMP, 'resume-parallel');
+  await fsp.mkdir(dir, { recursive: true });
+  const { parts, expected } = writeChunks(dir, 6, 512);
+  const half = expected.subarray(0, 512 + 256);
+  const sink = new FakeOpfsSink({ name: 'rp.bin', initial: Buffer.from(half) });
+  await sink.putText('rp.bin.building', 'build-resume');
+  const server = await serveDir(dir);
+  const seen = [];
+  const set = await run({
+    sink,
+    ensure: {
+      parts: parts.map((p) => ({ url: server.url + p.url, bytes: p.bytes })),
+      expectedSize: expected.length,
+      cacheKey: 'rp.bin',
+      buildId: 'build-resume',
+      onProgress: (p) => seen.push(p),
+    },
+  });
+  eq(set.size, expected.length, 'assembled size after resume');
+  ok(sink.buffer.equals(expected), 'the resumed file is byte-exact');
+  const last = seen[seen.length - 1];
+  eq(last.loaded, expected.length, 'the progress ends at the full size');
+  server.stop();
+});
+
+await test('a sink that can only be written in order keeps the old behaviour', async () => {
+  // The createWritable fallback and the RAM sink append: they cannot take
+  // parts out of order, so they must not be given a queue.
+  const dir = path.join(TMP, 'sequential');
+  await fsp.mkdir(dir, { recursive: true });
+  const { parts, expected } = writeChunks(dir, 4, 512);
+  const server = await serveDir(dir);
+
+  let inFlight = 0;
+  let peak = 0;
+  const fetchImpl = async (url, opts) => {
+    inFlight++;
+    peak = Math.max(peak, inFlight);
+    const res = await fetch(String(url), opts);
+    inFlight--;
+    return res;
+  };
+
+  const sink = new FakeOpfsSink({ name: 'seq.bin' });
+  sink.sequentialOnly = true;
+  await run({
+    sink,
+    ensure: {
+      parts: parts.map((p) => ({ url: server.url + p.url, bytes: p.bytes })),
+      expectedSize: expected.length,
+      cacheKey: 'seq.bin',
+      buildId: 'b',
+      fetchImpl,
+    },
+  });
+  eq(peak, 1, 'one part at a time');
+  ok(sink.buffer.equals(expected), 'and the bytes still land in the right places');
+  server.stop();
+});
+
 await fsp.rm(TMP, { recursive: true, force: true });
 await done('stream tests');

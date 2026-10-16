@@ -520,6 +520,49 @@
     }
   }
 
+  /* ---------------------------------------------------------------- *
+   * Audio element hygiene
+   *
+   * WebKit keeps a media element's decoder alive for as long as the
+   * element is in the document, even when nothing is playing — and
+   * Unity's WebAudio creates one element per channel, so a session that
+   * visits thirty rooms can end up with thirty decoders.
+   *
+   * The framework patch in tools/patches.mjs is what releases them: it
+   * drops the source of a channel when Unity disconnects it, which is
+   * what happens on a room change. This is the backstop for the elements
+   * that are left over — an element that is not playing and has nothing
+   * loaded is by definition unused, so its source is dropped and the
+   * decoder is torn down.
+   * ---------------------------------------------------------------- */
+  function releaseIdleAudio() {
+    var released = 0;
+    var elements;
+    try {
+      elements = document.querySelectorAll('audio, video');
+    } catch (e) {
+      return 0;
+    }
+    for (var i = 0; i < elements.length; i++) {
+      var element = elements[i];
+      try {
+        if (!element.paused) continue;         // it is playing: leave it alone
+        if (element.readyState > 0) continue;  // it still holds data: not idle
+        if (!element.getAttribute('src') && !element.src) continue; // nothing to release
+        // Drop the source and let the element run its load algorithm: with
+        // no source at all the network state goes to NETWORK_EMPTY and the
+        // decoder is torn down.
+        element.removeAttribute('src');
+        element.load();
+        released++;
+      } catch (e) {
+        /* a browser that does not like this is fine */
+      }
+    }
+    if (released) log('audio: released ' + released + ' idle media element(s)');
+    return released;
+  }
+
   // A tiny silent WAV assembled in memory: 8 kHz, 8-bit, mono, a tenth of a
   // second. Playing it inside a real gesture is what unlocks every other
   // media element for the rest of the session on iOS, and building it here
@@ -701,11 +744,25 @@
   var perf = { preset: 0, scale: 1, fps: 60, auto: true, crashSteps: 0 };
   var lastSessionInfo = null;
 
+  function presetIndex(id) {
+    for (var i = 0; i < PRESETS.length; i++) if (PRESETS[i].id === id) return i;
+    return 0;
+  }
+
   function defaultPresetIndex() {
-    // Touch devices start a step down: at 100 % and uncapped the game asks
-    // for more GPU time (and more video memory) than an iPad tab can keep
-    // up for a long session.
-    return isTouch() ? 1 : 0;
+    // A phone or a tablet starts a long way down the ladder.
+    //
+    // The canvas backing store is the first thing that kills a mobile
+    // tab: at "Balanced" (85 %) a 1366×1024 screen asks for ~4.7 MB of
+    // colour buffer plus a depth buffer, and Safari keeps a *copy* of
+    // the drawing buffer for compositing. "Low" (55 % render, 30 fps) is
+    // 40 % of those pixels — the difference between a tab that survives
+    // a long session and one WebKit kills with `webglcontextlost`.
+    //
+    // It is a default, not a cage: the player can raise it in
+    // Menu ▸ Graphics, and the auto-degrade and crash ladders still work
+    // on top of it.
+    return isSmallDevice() ? presetIndex('low') : 0;
   }
 
   function loadPerf() {
@@ -967,18 +1024,125 @@
     return applied;
   }
 
-  function cleanupMemory() {
+  /* ---------------------------------------------------------------- *
+   * Memory pressure
+   *
+   * The wasm heap is the biggest thing in the tab, and it is the thing
+   * iPadOS kills the tab over. Two knobs matter: how *often* the
+   * collector runs, and how hard it is asked to work.
+   *
+   * Below GC_PRESSURE_MB the game is comfortable and a collect every
+   * minute is enough (and costs nothing). Above it the game is close to
+   * the 1 GB ceiling `makeUnityConfig()` allows, so the collector runs
+   * four times as often and is asked for a *full* collection: the
+   * IL2CPP collector twice in a row — the first pass only makes the
+   * unreachable objects collectable, the second actually frees them —
+   * and the native side of the heap released as well.
+   * ---------------------------------------------------------------- */
+  var GC_PRESSURE_MB = 900;          // the heap is near the cap from here on
+  var GC_TICKS_NORMAL = 60;          // collect once a minute
+  var GC_TICKS_PRESSURE = 15;        // …and four times a minute under pressure
+
+  function isMemoryPressure() {
+    var heap = heapMB();
+    return heap !== null && heap >= GC_PRESSURE_MB;
+  }
+
+  /** How many one-second ticks between two collections. */
+  function gcIntervalTicks() {
+    return isMemoryPressure() ? GC_TICKS_PRESSURE : GC_TICKS_NORMAL;
+  }
+
+  /* ---------------------------------------------------------------- *
+   * A page-owned allocation inside Unity's wasm heap
+   *
+   * `Module._free` is the C `free()` of the wasm heap. It is only safe
+   * with a pointer *this page* allocated through `Module._malloc`:
+   * handing it a pointer Unity owns corrupts the heap, and a corrupted
+   * heap shows up as a black screen minutes later, when the freed
+   * memory is reused for something else.
+   *
+   * The page keeps exactly one such allocation — a staging block for
+   * the placeholder cutscene bytes — and `cleanupMemory()` gives it
+   * back when the heap gets close to the cap.
+   * ---------------------------------------------------------------- */
+  var wasmScratch = { ptr: 0, bytes: 0 };
+
+  function releaseWasmScratch() {
+    var Module = unityModule();
+    if (!Module || !wasmScratch.ptr || typeof Module._free !== 'function') return false;
+    try {
+      Module._free(wasmScratch.ptr);
+    } catch (e) {
+      logError('could not free the wasm scratch block: ' + ((e && e.message) || e));
+      return false;
+    }
+    wasmScratch.ptr = 0;
+    wasmScratch.bytes = 0;
+    return true;
+  }
+
+  /**
+   * Copy `bytes` into Unity's own heap and hand back a view of it.
+   *
+   * Used for the placeholder cutscene video: the mock response's body
+   * then lives in memory Unity already accounts for instead of in a
+   * second copy in the page's JavaScript heap. The view is only valid
+   * until the heap grows, so callers must copy out of it immediately.
+   */
+  function stageInWasmHeap(bytes) {
+    var Module = unityModule();
+    if (!Module || typeof Module._malloc !== 'function' || !bytes || !bytes.length) return bytes;
+    try {
+      if (!wasmScratch.ptr || wasmScratch.bytes < bytes.length) {
+        releaseWasmScratch();
+        wasmScratch.ptr = Module._malloc(bytes.length);
+        wasmScratch.bytes = bytes.length;
+        if (!wasmScratch.ptr) return bytes;
+      }
+      // Re-read the view: a _malloc that grew the heap replaced it.
+      var heap = Module.HEAPU8;
+      if (!heap || heap.length < wasmScratch.ptr + bytes.length) return bytes;
+      heap.set(bytes, wasmScratch.ptr);
+      return heap.subarray(wasmScratch.ptr, wasmScratch.ptr + bytes.length);
+    } catch (e) {
+      return bytes;
+    }
+  }
+
+  /**
+   * Ask Unity to give memory back.
+   *
+   * `deep` forces the full treatment; by default it is chosen from the
+   * size of the heap, so a big session collects more often than a small
+   * one without anybody having to configure it.
+   */
+  function cleanupMemory(deep) {
     if (!booted) return false;
     var Module = unityModule();
     if (!Module || !Module.asm) return false;
+    var pressure = deep === undefined ? isMemoryPressure() : !!deep;
     var ran = false;
+    // The managed heap. The IL2CPP collector is generational: the first
+    // pass only marks, the second frees — which is why the pressure path
+    // runs it twice.
     try {
       if (typeof Module.asm._gc_collect === 'function') {
         Module.asm._gc_collect();
+        if (pressure) Module.asm._gc_collect();
         ran = true;
       }
     } catch (e) {
       logError('gc_collect failed: ' + ((e && e.message) || e));
+    }
+    // Some builds export the collector at the top level as well.
+    try {
+      if (typeof Module._gc_collect === 'function') {
+        Module._gc_collect();
+        ran = true;
+      }
+    } catch (e) {
+      logError('Module._gc_collect failed: ' + ((e && e.message) || e));
     }
     try {
       if (typeof Module.asm._ResourceManager_UnloadUnusedAssets === 'function') {
@@ -1024,7 +1188,10 @@
         logError('System.GC.Collect (wasmTable ' + api.gcCollect + ') failed: ' + ((e && e.message) || e));
       }
     }
-    if (ran) log('memory cleanup: ran GC / UnloadUnusedAssets');
+    // The wasm allocator's free(). This is the one pointer the page is
+    // allowed to hand it — see wasmScratch above.
+    if (pressure && releaseWasmScratch()) ran = true;
+    if (ran) log('memory cleanup: ran GC / UnloadUnusedAssets' + (pressure ? ' (under pressure)' : ''));
     return ran;
   }
 
@@ -1130,9 +1297,24 @@
     return { warn: 1000, alarm: 1400, crashHeap: null, learned: false };
   }
 
-  var HARD_MEMORY_CAP_MB = Infinity;
-  var memCapTimer = 0;
-  var memCapSeconds = 0;
+  /* ---------------------------------------------------------------- *
+   * The memory cap is deliberately OFF.
+   *
+   * There used to be a hard ceiling here: when the wasm heap crossed it,
+   * the page counted down and reloaded the tab. On iPadOS that is the
+   * worst possible thing a page can do — a reload throws away the
+   * session, re-runs the whole boot, and (because the download is cached
+   * but the *game* is not) lands the player back at the start screen.
+   * It also raced with iPadOS itself: Safari's own jetsam kill arrives
+   * without warning, so the countdown usually never finished.
+   *
+   * The ceiling now lives in `makeUnityConfig()` (a 1 GB wasm heap) and
+   * in the graphics ladder (a smaller canvas = less video memory). The
+   * page *warns* about memory; it never reloads on its own.
+   * ---------------------------------------------------------------- */
+  var HARD_MEMORY_CAP_MB = Infinity;   // no automatic reload, ever
+  var memCapTimer = 0;                 // never armed
+  var memCapSeconds = 0;               // never armed
 
   function updateMemCapCorner() {
     // Disabled: user requested removal of "reset after memory limit reached"
@@ -1337,6 +1519,14 @@
         memoryLimits: memoryLimits,
         evaluateLastSession: evaluateLastSession,
         planFromManifest: planFromManifest,
+        defaultPresetIndex: defaultPresetIndex,
+        isSmallDevice: isSmallDevice,
+        makeUnityConfig: makeUnityConfig,
+        gcIntervalTicks: gcIntervalTicks,
+        isMemoryPressure: isMemoryPressure,
+        stageInWasmHeap: stageInWasmHeap,
+        releaseWasmScratch: releaseWasmScratch,
+        releaseIdleAudio: releaseIdleAudio,
         assetBase: function () { return ASSET_BASE; },
         buildSource: function () { return BUILD_SOURCE; },
         perfDescription: perfDescription,
@@ -1498,6 +1688,19 @@
   function isTouch() {
     return (navigator.maxTouchPoints || 0) > 0 || /iPad|iPhone|iPod|Android/i.test(navigator.userAgent);
   }
+  // A phone or a tablet browser, whether or not it reports touch points.
+  // iPadOS in "Request Desktop Website" mode reports none of them, and
+  // an Android tablet with a mouse attached reports a touchscreen but
+  // still gets the small-device treatment.
+  function isMobileBrowser() {
+    return /iPad|iPhone|iPod|Android|Mobile|Silk|Kindle|BlackBerry|Opera Mini|Windows Phone/i.test(navigator.userAgent);
+  }
+  // The case that matters: a device that jetsam-kills a tab instead of
+  // swapping it out, and whose GPU shares its memory with the rest of
+  // the system.
+  function isSmallDevice() {
+    return isTouch() || isMobileBrowser();
+  }
 
   $('menuBtn').addEventListener('click', async function () {
     panelEl.classList.toggle('hidden');
@@ -1603,7 +1806,11 @@
       watchForHang();
       tickCount++;
       if (tickCount % 2 === 0 && !panelEl.classList.contains('hidden')) refreshPerfRows();
-      if (tickCount % 60 === 0) cleanupMemory();
+      // Collect more often once the heap is close to the cap: a minute is
+      // a long time when every megabyte counts.
+      if (tickCount % gcIntervalTicks() === 0) cleanupMemory();
+      // …and give back the decoders of the media elements nobody uses.
+      if (tickCount % 30 === 0) releaseIdleAudio();
     }, 1000);
   }
 
@@ -1931,6 +2138,10 @@
       // Say so in the heartbeat: iPadOS kills background tabs all the time,
       // which is not a sign that the graphics level was too high.
       if (booted) writeHeartbeat();
+      // A hidden tab is exactly when a decoder is worth giving back: the
+      // game is not playing, and iPadOS is about to decide whether this
+      // tab deserves to stay alive.
+      releaseIdleAudio();
     } else {
       bgWarn.classList.add('hidden');
       lastFrameSeenAt = nowMs();
@@ -2157,8 +2368,17 @@
       companyName: 'Team Cherry',
       productName: 'Hollow Knight Silksong',
       productVersion: '1.0',
-      INITIAL_MEMORY: 33554432,
-      maximumHeapSize: 1468006400,
+      // The wasm heap is the biggest thing in the tab, and it is what
+      // iPadOS kills the tab over. 1 GB is the ceiling: the old 1.4 GB
+      // let Unity grow straight into the range where Safari's jetsam
+      // killer takes the whole WebContent process down without a
+      // chance to draw anything.
+      maximumHeapSize: 1073741824,
+      // Start with 16 MB instead of 32 MB: the page should not front-load
+      // RAM the game has not asked for yet, and Emscripten's heap grows
+      // in big steps from wherever it starts. The game's own data is
+      // copied in by Unity once the runtime is up.
+      INITIAL_MEMORY: 16777216,
       // Keep the WebGL backing buffers small on iPad Safari.
       webglContextAttributes: {
         alpha: false,
@@ -2166,9 +2386,18 @@
         stencil: !!compatMode,
         antialias: false,
         premultipliedAlpha: false,
+        // Nothing reads the drawing buffer back, so there is no reason
+        // for WebKit to keep a copy of it around after the frame is
+        // composited — that copy is pure video memory.
         preserveDrawingBuffer: false,
-        desynchronized: false,
-        powerPreference: isTouch() ? 'low-power' : 'high-performance',
+        // Let the compositor take the frame as soon as it is drawn
+        // instead of queueing it: a late frame is worse than a dropped
+        // one, and the queue is memory the tab cannot spare.
+        desynchronized: true,
+        // A phone or tablet GPU is thermally throttled and shares its
+        // memory with everything else on the device; asking for the
+        // high-performance path there costs video memory for nothing.
+        powerPreference: isSmallDevice() ? 'low-power' : 'high-performance',
         failIfMajorPerformanceCaveat: false,
       },
       postMainLoop: function () { noteFrame(nowMs()); },
@@ -2409,6 +2638,13 @@
     log('indexed ' + COMMUNITY_ZIP_MOUNT.entryCount + ' files in the community asset ZIP');
     SKCommunityBuild.installFetchMount(window, COMMUNITY_ZIP_MOUNT, {
       onAsset: function (name) { log('asset from local ZIP: ' + name); },
+      // The cutscenes are answered with a placeholder container instead of
+      // the real (hundreds of megabytes) video, and the bytes are staged in
+      // Unity's own heap so the page does not keep a second copy.
+      onVideo: function (name, bytes) {
+        log('cutscene served as a ' + bytes + ' byte placeholder: ' + name);
+      },
+      stageBytes: stageInWasmHeap,
     });
     try { if (archiveSet.dispose) archiveSet.dispose(); } catch (e) {}
 

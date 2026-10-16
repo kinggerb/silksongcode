@@ -79,6 +79,8 @@
       workerUrl: options.workerUrl || 'js/writer.js',
       preferDisk: true,
       allowMemoryFallback: false,
+      // The archive is 100 parts: one at a time is minutes of round trips.
+      concurrency: options.concurrency || 4,
       onProgress: options.onProgress,
       onStatus: options.onStatus,
       onLog: options.onLog,
@@ -93,6 +95,275 @@
 
   function decodePath(value) {
     try { return decodeURIComponent(value); } catch (e) { return value; }
+  }
+
+  /* ---------------------------------------------------------------- *
+   * Cutscenes: a placeholder instead of the real thing
+   *
+   * The community archive is the upstream one, so it still contains the
+   * high-definition cutscenes — some of them hundreds of megabytes. When
+   * Unity asks for one, the ZIP reader has to inflate it into a Blob
+   * first, and *that* is what empties a phone's memory: a single video
+   * can be bigger than the whole tab is allowed to be.
+   *
+   * So the mount never hands the real bytes over. A cutscene request is
+   * answered with a tiny, structurally valid container (an MP4 with a
+   * 2×2 track and no samples, or a WebM with a header and no clusters),
+   * which costs a few hundred bytes and plays as a black frame. The
+   * bytes are the same ones `makePlaceholderVideo()` in
+   * tools/unity-webdata.mjs builds for the prepared build — the two are
+   * compared byte for byte by the test suite.
+   * ---------------------------------------------------------------- */
+
+  function u32(value) {
+    var b = new Uint8Array(4);
+    b[0] = (value >>> 24) & 0xff;
+    b[1] = (value >>> 16) & 0xff;
+    b[2] = (value >>> 8) & 0xff;
+    b[3] = value & 0xff;
+    return b;
+  }
+
+  function u16(value) {
+    var b = new Uint8Array(2);
+    b[0] = (value >>> 8) & 0xff;
+    b[1] = value & 0xff;
+    return b;
+  }
+
+  function asciiBytes(text) {
+    var b = new Uint8Array(text.length);
+    for (var i = 0; i < text.length; i++) b[i] = text.charCodeAt(i) & 0xff;
+    return b;
+  }
+
+  function concatBytes(parts) {
+    var total = 0;
+    var i;
+    for (i = 0; i < parts.length; i++) total += parts[i].length;
+    var out = new Uint8Array(total);
+    var at = 0;
+    for (i = 0; i < parts.length; i++) {
+      out.set(parts[i], at);
+      at += parts[i].length;
+    }
+    return out;
+  }
+
+  function box(type, parts) {
+    var payload = concatBytes(parts);
+    return concatBytes([u32(payload.length + 8), asciiBytes(type), payload]);
+  }
+
+  function fullBox(version, flags, parts) {
+    var head = new Uint8Array([
+      version & 0xff,
+      (flags >>> 16) & 0xff,
+      (flags >>> 8) & 0xff,
+      flags & 0xff,
+    ]);
+    return concatBytes([head].concat(parts || []));
+  }
+
+  /** A minimal but structurally complete MP4 with a video track that has no samples. */
+  function makeMp4Placeholder(width, height, timescale, duration) {
+    width = width || 2;
+    height = height || 2;
+    timescale = timescale || 30;
+    duration = duration || 1;
+
+    var ftyp = box('ftyp', [asciiBytes('isom'), u32(0x200), asciiBytes('isomiso2mp41')]);
+    var mvhd = box('mvhd', [fullBox(0, 0, [
+      u32(0), u32(0),
+      u32(timescale), u32(duration * timescale),
+      u32(0x00010000), u16(0x0100), u16(0),
+      u32(0), u32(0),
+      u32(0x00010000), u32(0), u32(0),
+      u32(0), u32(0x00010000), u32(0),
+      u32(0), u32(0), u32(0x40000000),
+      u32(0), u32(0), u32(0), u32(0), u32(0), u32(0),
+      u32(2),
+    ])]);
+    var tkhd = box('tkhd', [fullBox(0, 7, [
+      u32(0), u32(0), u32(1), u32(0),
+      u32(duration * timescale),
+      u32(0), u32(0),
+      u16(0), u16(0), u16(0), u16(0),
+      u32(0x00010000), u32(0), u32(0),
+      u32(0), u32(0x00010000), u32(0),
+      u32(0), u32(0), u32(0x40000000),
+      u32(width << 16), u32(height << 16),
+    ])]);
+    var mdhd = box('mdhd', [fullBox(0, 0, [
+      u32(0), u32(0), u32(timescale), u32(duration * timescale), u16(0x55c4), u16(0),
+    ])]);
+    var hdlr = box('hdlr', [fullBox(0, 0, [
+      u32(0), asciiBytes('vide'), u32(0), u32(0), u32(0), asciiBytes('VideoHandler\0'),
+    ])]);
+    var esds = box('esds', [fullBox(0, 0, [
+      new Uint8Array([0x03, 0x19, 0x00, 0x01, 0x00]),
+      new Uint8Array([0x04, 0x11, 0x40, 0x15]),
+      new Uint8Array([0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]),
+      new Uint8Array([0x05, 0x02, 0x12, 0x10]),
+      new Uint8Array([0x06, 0x01, 0x02]),
+    ])]);
+    var mp4v = box('mp4v', [
+      new Uint8Array(6),
+      u16(1),
+      u16(0), u16(0), u16(0),
+      u32(0), u32(0), u32(0),
+      u16(width), u16(height),
+      u32(0x00480000), u32(0x00480000),
+      u32(0), u16(1),
+      new Uint8Array(32),
+      u16(0x0018),
+      u16(0xffff),
+      esds,
+    ]);
+    var stsd = box('stsd', [fullBox(0, 0, [u32(1), mp4v])]);
+    var stbl = box('stbl', [
+      stsd,
+      box('stts', [fullBox(0, 0, [u32(0)])]),
+      box('stsc', [fullBox(0, 0, [u32(0)])]),
+      box('stsz', [fullBox(0, 0, [u32(0), u32(0)])]),
+      box('stco', [fullBox(0, 0, [u32(0)])]),
+    ]);
+    var vmhd = box('vmhd', [fullBox(0, 1, [u16(0), u16(0), u16(0), u16(0)])]);
+    var dref = box('dref', [fullBox(0, 0, [u32(1), box('url ', [fullBox(0, 1)])])]);
+    var dinf = box('dinf', [dref]);
+    var minf = box('minf', [vmhd, dinf, stbl]);
+    var mdia = box('mdia', [mdhd, hdlr, minf]);
+    var trak = box('trak', [tkhd, mdia]);
+    var moov = box('moov', [mvhd, trak]);
+    var mdat = box('mdat', []);
+    return concatBytes([ftyp, moov, mdat]);
+  }
+
+  /** EBML/WebM: header + Segment(Info, Tracks) with a 2×2 V_VP8 track, no clusters. */
+  function makeWebmPlaceholder(width, height) {
+    width = width || 2;
+    height = height || 2;
+
+    function vint(value, length) {
+      var out = new Uint8Array(length);
+      for (var i = length - 1; i >= 0; i--) {
+        out[i] = value & 0xff;
+        value = Math.floor(value / 256);
+      }
+      out[0] |= 1 << (8 - length);
+      return out;
+    }
+    function ebmlId(id) {
+      var bytes = [];
+      var v = id;
+      while (v > 0) {
+        bytes.unshift(v & 0xff);
+        v = Math.floor(v / 256);
+      }
+      return new Uint8Array(bytes);
+    }
+    function el(id, payload) {
+      return concatBytes([ebmlId(id), vint(payload.length, 4), payload]);
+    }
+    function uintEl(id, value) {
+      var bytes = [];
+      var v = value;
+      do {
+        bytes.unshift(v & 0xff);
+        v = Math.floor(v / 256);
+      } while (v > 0);
+      return el(id, new Uint8Array(bytes));
+    }
+    function floatEl(id, value) {
+      var b = new Uint8Array(8);
+      new DataView(b.buffer).setFloat64(0, value, false);
+      return el(id, b);
+    }
+    function stringEl(id, text) {
+      return el(id, asciiBytes(text));
+    }
+
+    var ebml = el(0x1a45dfa3, concatBytes([
+      uintEl(0x4286, 1), uintEl(0x42f7, 1), uintEl(0x42f2, 4), uintEl(0x42f3, 8),
+      stringEl(0x4282, 'webm'), uintEl(0x4287, 4), uintEl(0x4285, 2),
+    ]));
+    var info = el(0x1549a966, concatBytes([
+      uintEl(0x2ad7b1, 1000000), floatEl(0x4489, 0.0), stringEl(0x7ba9, 'silksong-placeholder'),
+    ]));
+    var video = el(0xe0, concatBytes([uintEl(0xb0, width), uintEl(0xba, height)]));
+    var trackEntry = el(0xae, concatBytes([
+      uintEl(0xd7, 1),
+      uintEl(0x73c5, 1),
+      uintEl(0x83, 1),
+      stringEl(0x86, 'V_VP8'),
+      uintEl(0x23e383, 1000000000),
+      video,
+    ]));
+    var tracks = el(0x1654ae6b, trackEntry);
+    var segment = el(0x18538067, concatBytes([info, tracks]));
+    return concatBytes([ebml, segment]);
+  }
+
+  var placeholderCache = {};
+
+  /** The placeholder container for a kind of video, built once and kept. */
+  function placeholderVideoBytes(kind) {
+    var key = kind === 'webm' ? 'webm' : 'mp4';
+    if (!placeholderCache[key]) {
+      placeholderCache[key] = key === 'webm' ? makeWebmPlaceholder() : makeMp4Placeholder();
+    }
+    return placeholderCache[key];
+  }
+
+  // The same extensions and names the build pipeline uses to spot a video
+  // inside the data archive (tools/unity-webdata.mjs → looksLikeVideo).
+  var VIDEO_EXTENSIONS = /\.(mp4|webm|mov|m4v|avi|ogv|mpg|mpeg)$/;
+  var VIDEO_NAME = /^(movie|cinematic|cutscene|video|intro)[_/-]/i;
+  var VIDEO_SEGMENTS = [
+    'video', 'videos', 'cutscene', 'cutscenes', 'intro', 'intros',
+    'cinematic', 'cinematics', 'movie', 'movies',
+  ];
+  // …but never a Unity asset bundle that happens to be called "video_*".
+  // A false positive here is not a black cutscene, it is a missing game
+  // asset, so the name rule below only fires for a file that has no
+  // extension at all.
+  var NOT_VIDEO_EXTENSIONS = [
+    '.bundle', '.bin', '.resource', '.assets', '.dat', '.json', '.bytes',
+    '.hash', '.xml', '.txt', '.config', '.manifest', '.unity3d', '.resS',
+    '.scene', '.prefab', '.shader', '.png', '.jpg', '.jpeg', '.wav', '.ogg',
+  ];
+
+  function extensionOf(name) {
+    var at = String(name || '').lastIndexOf('.');
+    return at < 0 ? '' : String(name).slice(at).toLowerCase();
+  }
+
+  /** Is this URL path a cutscene rather than an ordinary asset? */
+  function isVideoPath(pathname) {
+    var lower = decodePath(String(pathname || '')).toLowerCase();
+    var segments = lower.split('/');
+    var last = segments.length - 1;
+    for (var i = 0; i < segments.length; i++) {
+      var segment = segments[i];
+      if (!segment) continue;
+      if (i === last) {
+        if (VIDEO_EXTENSIONS.test(segment)) return true;
+        var extension = extensionOf(segment);
+        if (extension) continue;                 // a named asset is not a video
+        if (VIDEO_NAME.test(segment)) return true;
+      } else if (VIDEO_SEGMENTS.indexOf(segment) >= 0) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** The kind of container to answer a video request with. */
+  function videoKindFor(pathname) {
+    var lower = decodePath(String(pathname || '')).toLowerCase();
+    if (/\.(webm|ogv|ogg)$/.test(lower)) return 'webm';
+    if (/\.(mp4|mov|m4v|avi|mpg|mpeg)$/.test(lower)) return 'mp4';
+    return 'mp4';
   }
 
   async function openArchive(file, zipLib) {
@@ -172,9 +443,9 @@
     };
   }
 
-  function rangeResponse(blob, rangeHeader) {
+  function rangeResponse(blob, rangeHeader, contentType) {
     var headers = new Headers({
-      'Content-Type': 'application/octet-stream',
+      'Content-Type': contentType || 'application/octet-stream',
       'Accept-Ranges': 'bytes',
     });
     var range = /^bytes=(\d*)-(\d*)$/i.exec(String(rangeHeader || ''));
@@ -206,11 +477,54 @@
     if (!target || typeof target.fetch !== 'function') throw fail('fetch is not available for the asset mount');
     var previous = target.fetch.bind(target);
     var onAsset = options.onAsset || function () {};
+    var onVideo = options.onVideo || function () {};
+    // Optional: hand the placeholder bytes to the page so it can stage them
+    // in Unity's own heap (see play.html → stageInWasmHeap).
+    var stageBytes = typeof options.stageBytes === 'function' ? options.stageBytes : null;
+    var bypassVideos = options.bypassVideos !== false;
 
     target.fetch = function (input, init) {
       var rawUrl = typeof input === 'string' || input instanceof URL ? String(input) : input && input.url;
       if (!rawUrl) return previous(input, init);
       var method = String((init && init.method) || (input && input.method) || 'GET').toUpperCase();
+      var pathname = rawUrl;
+      try {
+        pathname = new URL(rawUrl, (typeof location !== 'undefined' && location.href) || 'https://silksong.invalid/').pathname;
+      } catch (e) {
+        pathname = String(rawUrl).split('?')[0].split('#')[0];
+      }
+
+      // Cutscenes never reach the network and never reach the ZIP: the
+      // placeholder container is answered straight away, so a phone never
+      // has to hold a high-definition video in memory.
+      if (bypassVideos && (method === 'GET' || method === 'HEAD') && isVideoPath(pathname)) {
+        var kind = videoKindFor(pathname);
+        var bytes = placeholderVideoBytes(kind);
+        var contentType = kind === 'webm' ? 'video/webm' : 'video/mp4';
+        onVideo(pathname, bytes.length);
+        if (method === 'HEAD') {
+          return Promise.resolve(new Response(null, {
+            status: 200,
+            headers: new Headers({
+              'Content-Type': contentType,
+              'Content-Length': String(bytes.length),
+              'Accept-Ranges': 'bytes',
+            }),
+          }));
+        }
+        var videoRange = null;
+        try {
+          var videoHeaders = new Headers((init && init.headers) || (input && input.headers) || undefined);
+          videoRange = videoHeaders.get('range');
+        } catch (e) {}
+        var body = bytes;
+        if (stageBytes) {
+          var staged = stageBytes(bytes);
+          if (staged && staged.length === bytes.length) body = staged;
+        }
+        return Promise.resolve(rangeResponse(new Blob([body], { type: contentType }), videoRange, contentType));
+      }
+
       var entry = archive.entryFor(rawUrl);
       if (!entry || (method !== 'GET' && method !== 'HEAD')) return previous(input, init);
       if (method === 'HEAD') {
@@ -246,5 +560,12 @@
     ensureArchive: ensureArchive,
     openArchive: openArchive,
     installFetchMount: installFetchMount,
+    // Exported for the test suite and for anything that wants to build the
+    // same placeholder container the build pipeline writes.
+    makePlaceholderVideo: function (kind) {
+      return kind === 'webm' ? makeWebmPlaceholder() : makeMp4Placeholder();
+    },
+    isVideoPath: isVideoPath,
+    videoKindFor: videoKindFor,
   };
 });

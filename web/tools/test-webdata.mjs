@@ -242,8 +242,11 @@ await test('the room-audio fix applies once and is idempotent', () => {
     'this.source.onended=null;this.source.disconnect();delete this.source};';
   const first = patchFramework(Buffer.from(pristine, 'latin1'));
   eq(first.changed, true, 'the pristine framework is patched');
-  ok(first.bytes.toString('latin1').includes('mediaElement.src=""'), 'it clears the audio element source');
-  ok(first.bytes.toString('latin1').includes('mediaElement.load()'), 'and releases the decoder');
+  const patched = first.bytes.toString('latin1');
+  ok(patched.includes('mediaElement.src=""'), 'it clears the audio element source');
+  ok(patched.includes('mediaElement.load()'), 'and releases the decoder');
+  ok(patched.includes('mediaElement.pause()'), 'and stops the element first');
+  ok(patched.includes('removeAttribute("src")'), 'and drops the src attribute itself');
   const second = patchFramework(first.bytes);
   eq(second.changed, false, 'a second pass changes nothing');
   const unrelated = patchFramework(Buffer.from('function somethingElse(){return 1}', 'latin1'));

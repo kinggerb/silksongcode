@@ -115,10 +115,12 @@ Some of the iPad-relevant fixes have to happen *inside* the build. Two kinds:
 **framework.js** — implemented and applied automatically when they match
 (`tools/patches.mjs`):
 
-* *release the audio source*: `channel.disconnectSource` clears
-  `mediaElement.src` and calls `load()`, and drops the framework's own
-  pending-autoplay entry. Without it WebKit keeps every room's music decoder
-  alive.
+* *release the audio source*: `channel.disconnectSource` pauses the
+  `mediaElement`, drops its `src` attribute, clears `mediaElement.src` and
+  calls `load()`, and drops the framework's own pending-autoplay entry.
+  Without it WebKit keeps every room's music decoder alive. The page is the
+  backstop: it sweeps the media elements that are not playing and have nothing
+  loaded, and gives their source back too.
 * *fix the undefined variable*: some framework versions log `error` inside a
   `catch(e)` block, so stopping a sound throws `ReferenceError` — an unhandled
   error at exactly the wrong moment.
