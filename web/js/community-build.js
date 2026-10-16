@@ -54,12 +54,169 @@
     return String(base).replace(/\/+$/, '') + '/' + String(path).replace(/^\/+/, '');
   }
 
+  /** A human readable size, in megabytes. */
+  function mb(bytes) {
+    return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+  }
+
   function parts(config, base) {
     validate(config);
     var root = base || config.base;
     return config.assetArchive.parts.map(function (part) {
       return { url: join(root, part.path), bytes: part.bytes };
     });
+  }
+
+  /* ---------------------------------------------------------------- *
+   * A smaller archive
+   *
+   * The upstream archive is one 1.94 GiB ZIP, and a good part of it is
+   * the high-definition cutscenes — the very files the page answers with
+   * a placeholder instead of the real bytes. Downloading them is a waste
+   * of an hour on a phone and a gigabyte of storage nobody can use.
+   *
+   * So before the download starts, the archive is asked for its index:
+   * two small range requests read the ZIP's central directory, which
+   * says where every file lives inside the archive. With that in hand
+   * the download can skip the files nobody is ever going to read, and
+   * the archive is written out again in a smaller, perfectly ordinary
+   * ZIP (the entries are copied byte for byte — nothing is recompressed).
+   *
+   * If the server does not honour byte ranges, or the archive is not
+   * shaped the way we expect, the whole archive is downloaded as before.
+   * ---------------------------------------------------------------- */
+
+  // Below this there is no point: the plan costs a couple of requests.
+  var MIN_SAVING = 1024 * 1024;
+
+  /* ---------------------------------------------------------------- *
+   * Remembering the cutscenes
+   *
+   * Telling a game bundle from a cutscene by looking at its bytes
+   * takes a few hundred small requests, and the answer is the same for
+   * every launch of the same build. So it is looked at once and the
+   * names are remembered in local storage — the next launch only has to
+   * read the archive's own index.
+   * ---------------------------------------------------------------- */
+
+  function sniffKey(options) {
+    return 'silksong.archive.cutscenes.' + (options.key || 'default');
+  }
+
+  function storageFor(options) {
+    if (options.storage) return options.storage;
+    try {
+      if (typeof localStorage !== 'undefined' && localStorage) return localStorage;
+    } catch (e) { /* no storage (private mode, or a sandboxed frame) */ }
+    return null;
+  }
+
+  function loadRemembered(options) {
+    try {
+      var store = storageFor(options);
+      if (!store) return null;
+      var text = store.getItem(sniffKey(options));
+      if (!text) return null;
+      var names = JSON.parse(text);
+      return Array.isArray(names) ? names : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function remember(options, names) {
+    try {
+      var store = storageFor(options);
+      if (!store) return;
+      store.setItem(sniffKey(options), JSON.stringify(names || []));
+    } catch (e) { /* no room, or no storage */ }
+  }
+
+  function zipLibrary(options) {
+    if (options && options.zip) return options.zip;
+    if (typeof SKZipPlan !== 'undefined') return SKZipPlan;
+    // Node (the test suite) has no globals: the module sits next to this one.
+    try {
+      if (typeof require === 'function') return require('./zip-plan.js');
+    } catch (e) { /* not a CommonJS host */ }
+    return null;
+  }
+
+  /**
+   * Read the archive's index and work out what can be left out.
+   *
+   * Returns null when the archive cannot be pruned — the caller then
+   * downloads it whole, exactly as before.
+   */
+  async function planArchive(partList, options) {
+    options = options || {};
+    var zip = zipLibrary(options);
+    if (!zip || typeof zip.readIndex !== 'function') return null;
+
+    var reader = zip.createReader(partList, {
+      fetchImpl: options.fetchImpl,
+      signal: options.signal,
+    });
+
+    var index = await zip.readIndex(reader);
+    if (!index) return null;
+    // A server that ignores the Range header sends whole files, and then
+    // there is nothing to save.
+    if (!reader.ranges) return null;
+
+    var plan = zip.planEntries(index, {
+      skip: options.skip || function (name) {
+        // The very same rule the mount uses to answer a cutscene with a
+        // placeholder: a file that is left out of the archive has to be one
+        // the page never asks the archive for.
+        if (isVideoPath('/StreamingAssets/' + String(name).replace(/^\/+/, ''))) return 'video';
+        if (zip.isOtherPlatformEntry(name)) return 'other';
+        return '';
+      },
+    });
+
+    // A name is only a hint: the big entries are looked at as well, because
+    // a cutscene that is called "packed-something.bundle" is still a
+    // cutscene, and leaving it out is the whole point. The answer is the
+    // same for every launch, so it is remembered.
+    var remembered = loadRemembered(options);
+    if (remembered) {
+      if (typeof zip.applySniffed === 'function') plan = zip.applySniffed(plan, index, remembered);
+    } else if (typeof zip.planEntriesAsync === 'function') {
+      plan = await zip.planEntriesAsync(index, reader, {
+        skip: options.skip,
+        minBytes: options.minSniffBytes,
+        maxSniffs: options.maxSniffs,
+      });
+      remember(options, plan.sniffedNames);
+    }
+
+    if (!plan.skipped.length || plan.skippedBytes < MIN_SAVING) return null;
+
+    var layout = zip.buildLayout(plan, index);
+    if (!layout) return null;
+
+    var segments = zip.buildSegments(layout, partList);
+    var videoNames = plan.skipped
+      .filter(function (entry) { return entry.skipReason === 'video'; })
+      .map(function (entry) { return basename(entry.name).toLowerCase(); })
+      .filter(function (name, at, all) { return name && all.indexOf(name) === at; });
+    return {
+      segments: segments,
+      // What the file on the device will be.
+      outputSize: layout.outputSize,
+      // What the network has to send.
+      downloadBytes: layout.downloadBytes,
+      keptBytes: plan.keptBytes,
+      skippedBytes: plan.skippedBytes,
+      skippedCount: plan.skipped.length,
+      skippedNames: plan.skipped.map(function (entry) { return entry.name; }),
+      // The cutscenes that are left out, so the mount can answer a request
+      // for one of them with a placeholder instead of a missing file.
+      videoNames: videoNames,
+      entryCount: index.entries.length,
+      sniffed: plan.sniffed || 0,
+    };
   }
 
   async function ensureArchive(config, options) {
@@ -69,18 +226,76 @@
     if (!stream || typeof stream.ensureDataset !== 'function') throw fail('the low-memory storage loader did not load');
     var base = options.base || config.base;
     var archive = config.assetArchive;
+    var partList = parts(config, base);
+
+    // Work out whether the archive can be made smaller before a single
+    // byte of it is downloaded.
+    var plan = null;
+    if (options.prune !== false) {
+      try {
+        plan = await planArchive(partList, Object.assign({}, options, {
+          key: config.buildId + ':' + archive.total,
+        }));
+      } catch (error) {
+        if (options.onLog) {
+          options.onLog('could not plan a smaller archive (' + ((error && error.message) || error) + ') — downloading the whole thing');
+        }
+        plan = null;
+      }
+    }
+
+    if (plan) {
+      if (options.onLog) {
+        options.onLog(
+          'leaving out ' + plan.skippedCount + ' of ' + plan.entryCount + ' archive files (' +
+            mb(plan.skippedBytes) + ' of cutscenes and other platforms) — ' +
+            mb(plan.downloadBytes) + ' instead of ' + mb(archive.total)
+        );
+      }
+      if (options.onPlan) options.onPlan(plan);
+      var pruned = await stream.ensureDataset({
+        segments: plan.segments,
+        expectedSize: plan.outputSize,
+        // The same cache file as the whole archive: the pruned one replaces
+        // it, so the device is not left with both. The build id says which
+        // of the two it is, so a half-downloaded one is never continued as
+        // the other.
+        cacheKey: archive.cacheKey,
+        buildId: 'pruned-' + config.buildId,
+        mime: archive.mime || 'application/zip',
+        verify: 'size',
+        workerUrl: options.workerUrl || 'js/writer.js',
+        writerFactory: options.writerFactory,
+        preferDisk: true,
+        allowMemoryFallback: false,
+        concurrency: options.concurrency || 4,
+        fetchImpl: options.fetchImpl,
+        onProgress: options.onProgress,
+        onStatus: options.onStatus,
+        onLog: options.onLog,
+        signal: options.signal,
+      });
+      pruned.plan = plan;
+      return pruned;
+    }
+
     return stream.ensureDataset({
-      parts: parts(config, base),
+      parts: partList,
       expectedSize: archive.total,
+      // The same cache file as the pruned one, but a build id of its own: the
+      // loader has to be able to tell the two apart, or a half-downloaded
+      // archive would be continued as the other one.
       cacheKey: archive.cacheKey,
       buildId: config.buildId,
       mime: archive.mime || 'application/zip',
       verify: 'size',
       workerUrl: options.workerUrl || 'js/writer.js',
+      writerFactory: options.writerFactory,
       preferDisk: true,
       allowMemoryFallback: false,
       // The archive is 100 parts: one at a time is minutes of round trips.
       concurrency: options.concurrency || 4,
+      fetchImpl: options.fetchImpl,
       onProgress: options.onProgress,
       onStatus: options.onStatus,
       onLog: options.onLog,
@@ -482,6 +697,12 @@
     // in Unity's own heap (see play.html → stageInWasmHeap).
     var stageBytes = typeof options.stageBytes === 'function' ? options.stageBytes : null;
     var bypassVideos = options.bypassVideos !== false;
+    // The cutscenes that were left out of the archive. A video that is
+    // called something else than a video is only known by its name here.
+    var videoNames = Object.create(null);
+    (options.videoNames || []).forEach(function (name) {
+      if (name) videoNames[String(name).toLowerCase()] = true;
+    });
 
     target.fetch = function (input, init) {
       var rawUrl = typeof input === 'string' || input instanceof URL ? String(input) : input && input.url;
@@ -497,7 +718,8 @@
       // Cutscenes never reach the network and never reach the ZIP: the
       // placeholder container is answered straight away, so a phone never
       // has to hold a high-definition video in memory.
-      if (bypassVideos && (method === 'GET' || method === 'HEAD') && isVideoPath(pathname)) {
+      var isCutscene = isVideoPath(pathname) || videoNames[basename(decodePath(pathname)).toLowerCase()];
+      if (bypassVideos && (method === 'GET' || method === 'HEAD') && isCutscene) {
         var kind = videoKindFor(pathname);
         var bytes = placeholderVideoBytes(kind);
         var contentType = kind === 'webm' ? 'video/webm' : 'video/mp4';
@@ -558,6 +780,7 @@
     validate: validate,
     parts: parts,
     ensureArchive: ensureArchive,
+    planArchive: planArchive,
     openArchive: openArchive,
     installFetchMount: installFetchMount,
     // Exported for the test suite and for anything that wants to build the

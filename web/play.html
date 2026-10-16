@@ -241,6 +241,7 @@
 
 <script src="js/stream.js"></script>
 <script src="js/manifest.js"></script>
+<script src="js/zip-plan.js"></script>
 <script src="js/community-build.js"></script>
 <script src="js/zip.min.js"></script>
 <script src="js/save-codec.js"></script>
@@ -310,6 +311,7 @@
     try { return JSON.stringify(o); } catch (e) { return String(o); }
   }
   function mb(b) { return (b / 1048576).toFixed(1) + ' MB'; }
+  function gb(b) { return (b / 1073741824).toFixed(1) + ' GB'; }
   var toastTimer = 0;
   function toast(msg, ms) {
     toastEl.textContent = msg;
@@ -371,7 +373,8 @@
       useRewriter = true;
       BUILD_SOURCE = 'community';
       $('sub').textContent = 'First run downloads about ' + mb(COMMUNITY_BUILD.assetArchive.total) +
-        ' of game assets to this device’s storage. It is resumable; keep Safari open on Wi-Fi. Later runs reuse the cached archive.';
+        ' of game assets to this device’s storage — the cutscenes are left out, so it is usually ' +
+        'a good deal less. It is resumable; keep Safari open on Wi-Fi. Later runs reuse the cached archive.';
       log('using community WebGL source ' + COMMUNITY_BUILD.source + ' @ ' + COMMUNITY_BUILD.commit);
       return true;
     } catch (e) {
@@ -2593,6 +2596,10 @@
       unity: source.unity,
     };
     totalBytes = source.assetArchive.total;
+    // The archive is smaller than the published one once the cutscenes and
+    // the other platforms' bundles are left out; the exact figure is only
+    // known once the ZIP's own index has been read.
+    var archiveBytes = source.assetArchive.total;
     setDataMb(totalBytes);
     refreshPerfRows();
     log('community build ' + source.buildId + ': asset archive ' + mb(totalBytes));
@@ -2619,6 +2626,19 @@
       base: ASSET_BASE,
       workerUrl: 'js/writer.js',
       onStatus: function (message) { setStatus('Game assets: ' + message); },
+      onPlan: function (plan) {
+        // The cutscenes (and any bundle for another platform) are left out of
+        // the archive, so both the download and the file on the device are
+        // smaller than the published one.
+        archiveBytes = plan.outputSize;
+        totalBytes = plan.downloadBytes;
+        setDataMb(totalBytes);
+        $('sub').textContent = 'First run downloads about ' + mb(plan.downloadBytes) +
+          ' of game assets — ' + mb(plan.skippedBytes) + ' of cutscenes are left out. ' +
+          'It is resumable; keep Safari open on Wi-Fi. Later runs reuse the cached archive.';
+        log('archive plan: ' + mb(plan.downloadBytes) + ' instead of ' + mb(source.assetArchive.total) +
+          ' (' + plan.skippedCount + ' of ' + plan.entryCount + ' files left out)');
+      },
       onProgress: function (progress) {
         var fraction = progress.total ? progress.loaded / progress.total : 0;
         var eta = progress.bytesPerSecond > 0 ? ' · about ' + Math.max(1, Math.round(progress.etaSeconds / 60)) + ' min left' : '';
@@ -2630,7 +2650,8 @@
       onLog: log,
     });
     if (!archiveSet || !archiveSet.file) {
-      throw new Error('Safari could not read the asset archive back from local storage. Free up at least 2.1 GB and try again.');
+      throw new Error('Safari could not read the asset archive back from local storage. Free up at least ' +
+        gb(archiveBytes * 1.05) + ' and try again.');
     }
 
     setStatus('Indexing the cached game assets…');
@@ -2644,6 +2665,10 @@
       onVideo: function (name, bytes) {
         log('cutscene served as a ' + bytes + ' byte placeholder: ' + name);
       },
+      // The cutscenes that were left out of the archive, including the ones
+      // whose names do not look like a video: they are answered with the
+      // placeholder too, so nothing asks for a file that is not there.
+      videoNames: archiveSet.plan ? archiveSet.plan.videoNames : [],
       stageBytes: stageInWasmHeap,
     });
     try { if (archiveSet.dispose) archiveSet.dispose(); } catch (e) {}
@@ -2761,7 +2786,8 @@
       errEl.textContent =
         message + '\n\n' +
         (String(message).match(/quota|Quota|space/i)
-          ? 'There is not enough free storage on this device. Free up ~2 GB (Settings ▸ General ▸ iPad Storage) and tap start again.\n\n'
+          ? 'There is not enough free storage on this device. Free up ~' + gb(totalBytes || 2 * 1073741824) +
+            ' (Settings ▸ General ▸ iPad Storage) and tap start again.\n\n'
           : '') +
         'Details are in the Menu ▸ Log panel. If the tab was killed while loading, the ' +
         'game data is still cached — tapping start again continues where it stopped.';
