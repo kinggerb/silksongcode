@@ -639,7 +639,7 @@ await test('the reported iPad scene: 25 % on a 1180×734 Retina screen stays 295
 
   // The device log says which shell is running.
   const log = win.document.getElementById('logbox').textContent;
-  ok(/shell=1\.1\.2 WebGL2/.test(log), 'the menu log shows the shell and renderer: ' + (log.split('\n').find((l) => l.includes('shell=')) || '').trim());
+  ok(/shell=1\.2\.0 WebGL2/.test(log), 'the menu log shows the shell and renderer: ' + (log.split('\n').find((l) => l.includes('shell=')) || '').trim());
   win.close();
 });
 
@@ -862,7 +862,7 @@ await test('an idle media element gives its source back', () => {
   win.close();
 });
 
-section('shell 1.1.2: crash report, safe mode, engine failures, payload');
+section('crash report, safe mode, engine failures, payload (shell 1.1.2+)');
 
 function crashReport(win) {
   return win.document.getElementById('crashReport');
@@ -897,7 +897,7 @@ await test('a killed session leaves a crash report with the heap, the last log l
   eq(safe.textContent, 'Start in safe mode', 'the button says what it does');
   eq(win.localStorage.getItem('sk.lastlog'), null, 'the recorder key was consumed so it cannot be shown twice');
   const diagnostics = win.SKPerf.internals().diagnosticsText();
-  ok(diagnostics.includes('shell=1.1.2 WebGL2'), 'diagnostics name the shell');
+  ok(diagnostics.includes('shell=1.2.0 WebGL2'), 'diagnostics name the shell');
   ok(diagnostics.includes('userAgent:'), 'and the user agent');
   ok(diagnostics.includes('last-session:'), 'and a last-session summary');
   ok(diagnostics.includes('stage:'), 'and the stage');
@@ -975,8 +975,72 @@ await test('safe mode reloads with the rock-bottom memory parameters', () => {
   eq(url.searchParams.get('auto'), '1');
   eq(url.searchParams.get('downloads'), '2');
   eq(url.searchParams.get('bundleCacheMB'), '64');
+  eq(url.searchParams.get('wasmHeap'), '1024', 'and the lowest rung of the initial-heap ladder');
+  eq(url.searchParams.get('bundleStream'), '1', 'and streamed bundle delivery forced on');
   eq(url.searchParams.get('foo'), 'bar', 'existing parameters are kept');
   eq(url.searchParams.get('community'), '1', 'and so is the build selector');
+  win.close();
+});
+
+section('shell 1.2.0: wasm heap ladder, streamed bundles, first frame');
+
+await test('the runtime patch settings are readable and follow the query switches', () => {
+  const win = bootPage();
+  const settings = win.SKPerf.settings();
+  eq(settings.wasmHeapMiB, 1536, 'the default initial heap is 1536 MiB, not the published 2048');
+  eq(settings.bundleStreaming, true, 'bundles stream by default');
+  eq(settings.patchOptions.unloadPatch, true, 'the unload gate patch is on by default');
+  eq(settings.patchOptions.frameworkPatch, true, 'the framework audio patch is on by default');
+  const summary = win.SKPerf.internals().communityPatchSummary();
+  ok(summary.includes('1536 MiB'), 'the summary says which heap will be declared: ' + summary);
+  ok(summary.includes('streamed'), 'and how bundles are delivered');
+  win.close();
+
+  const opted = bootPage({ query: '?wasmHeap=1024&bundleStream=0&unloadPatch=0&frameworkPatch=0' });
+  const optedSettings = opted.SKPerf.settings();
+  eq(optedSettings.wasmHeapMiB, 1024, '?wasmHeap picks the ladder rung');
+  eq(optedSettings.bundleStreaming, false, '?bundleStream=0 returns to the Blob path');
+  eq(optedSettings.patchOptions.unloadPatch, false, '?unloadPatch=0 kept');
+  eq(optedSettings.patchOptions.frameworkPatch, false, '?frameworkPatch=0 kept');
+  opted.close();
+
+  const nonsense = bootPage({ query: '?wasmHeap=99999' });
+  eq(nonsense.SKPerf.settings().wasmHeapMiB, 1536, 'an out-of-range heap falls back to the default rung');
+  nonsense.close();
+});
+
+await test('diagnostics record the runtime patch settings of this load', () => {
+  const win = bootPage({ query: '?wasmHeap=1280' });
+  const diagnostics = win.SKPerf.internals().diagnosticsText();
+  ok(diagnostics.includes('runtime patches (this load):'), 'diagnostics carry a patch line');
+  ok(diagnostics.includes('1280 MiB'), 'with the heap this load asked for');
+  win.close();
+});
+
+await test('the loading overlay stays up until frames are actually flowing, and the stage says so', async () => {
+  // Engine-ready used to hide the overlay instantly, presenting a black
+  // canvas for the whole first-scene bundle load — the window in which
+  // the affected iPad dies. Now the stage marker keeps naming that
+  // window until the frame loop has demonstrably run.
+  const win = await bootToUnity();
+  const screen = win.document.getElementById('screen');
+  eq(win.SKPerf.internals().waitingForFirstFrame(), true, 'the page knows it has not seen a frame yet');
+  ok(!screen.classList.contains('hidden'), 'the loading screen is still up over the not-yet-drawn canvas');
+  ok(win.document.getElementById('status').textContent.includes('first scene'), 'and it says what it is waiting for: ' + win.document.getElementById('status').textContent);
+  const stage = JSON.parse(win.localStorage.getItem('sk.stage'));
+  ok(stage && stage.stage.includes('first scene'), 'the flight-recorder stage names the first-scene window: ' + (stage && stage.stage));
+  ok(win.document.getElementById('logbox').textContent.includes('page memory levers'), 'the boot log says which memory levers this binary answers');
+
+  // Three released frames: the engine loop is really turning.
+  for (let i = 0; i < 3; i++) {
+    win.eval('requestAnimationFrame(function () {})');
+    pumpFrames(win);
+  }
+  for (let i = 0; i < 100 && win.SKPerf.internals().waitingForFirstFrame(); i++) await new Promise((resolve) => setTimeout(resolve, 10));
+  eq(win.SKPerf.internals().waitingForFirstFrame(), false, 'frames ended the wait');
+  ok(screen.classList.contains('hidden'), 'and only then did the loading screen go away');
+  eq(win.localStorage.getItem('sk.stage'), null, 'the stage marker is cleared once running');
+  ok(win.document.getElementById('logbox').textContent.includes('first frame drawn'), 'the first frame is in the log');
   win.close();
 });
 

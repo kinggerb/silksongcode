@@ -158,8 +158,8 @@ Three numbers decide whether the tab survives the session:
 
 | What | Value | Why |
 | --- | --- | --- |
-| wasm heap | ~2 GiB, fixed by the pinned binary | the biggest thing in the tab — and **not a page setting**. The pinned community build compiles its heap in; it ignores the `maximumHeapSize`/`INITIAL_MEMORY` hints below, so the "2048 MB of wasm heap" the log reports is real. No HTML setting can turn it into a 1 GB heap, and patching the wasm allocator is not attempted — a wrongly patched allocator corrupts the heap. What works: the render scale (a smaller canvas buffer = less video memory) and the collection cadence. |
-| `maximumHeapSize` / `INITIAL_MEMORY` | 1 GB / 16 MB | kept for a *self-built* standard build, which does honour them: the heap ceiling stays out of the range where Safari's jetsam killer takes the whole WebContent process, and a small start means no RAM is front-loaded while the game boots. The pinned build simply starts at its own compiled-in size. |
+| wasm heap (initial) | 1536 MiB by default (`?wasmHeap=` picks 1280 or 1024; safe mode uses 1024) | the biggest thing in the tab. The pinned community build compiles its initial heap in at 2048 MiB and ignores the `maximumHeapSize`/`INITIAL_MEMORY` hints below — but that initial size is a three-byte LEB128 in the wasm memory section, and since shell 1.2.0 the page rewrites exactly that field *while the module stream-compiles* (context-verified, same length, maximum untouched; see `js/unity-startup.js`). This is not an allocator patch: the heap simply starts smaller and grows on demand past it, so the megabytes the game never allocates are never backed by the OS. The boot log proves it twice over — `wasm patch wasm-initial-heap: applied … initial 2048 → 1536 MiB` from the patcher, and `game memory: 1536 MB of wasm heap` from the live module. If the context bytes ever disagree (a different binary), the patch is skipped and the log says so; the game then starts at its compiled-in 2048 MiB. |
+| `maximumHeapSize` / `INITIAL_MEMORY` | 1 GB / 16 MB | kept for a *self-built* standard build, which does honour them. The pinned framework contains neither name (verified by reading it), so for the community build they are dead config — the heap numbers that matter there come from the wasm patch above, not from this object. |
 | `webglContextAttributes` | `preserveDrawingBuffer: false`, `desynchronized: true`, `powerPreference: 'low-power'` on a phone | no copy of the drawing buffer is kept for compositing, late frames are dropped instead of queued, and the phone's GPU is not asked for the high-performance path. |
 
 The page **never reloads the tab on its own**. There used to be a hard heap
@@ -184,9 +184,11 @@ for a 1180×734 screen` and a black screen at 0 fps. The SHA-verified loader
 patch removes that probe (no adapter request at all, `SystemInfo.hasWebGPU`
 forced false before the framework picks a renderer), and a `preRun` guard
 clears the flag again for any loader that could not be patched. The boot log
-says which shell and renderer you got: `shell=1.1.2 WebGL2`. Shell 1.1.1 is
-the release that forced WebGL 2; 1.1.2 adds the crash report. A cached older
-page still logs `1.1.1` or `1.1.0` — reload until it does not.
+says which shell and renderer you got: `shell=1.2.0 WebGL2`. Shell 1.1.1 is
+the release that forced WebGL 2; 1.1.2 added the crash report; 1.2.0 adds
+the runtime wasm heap patch, streamed bundle delivery and the first-frame
+overlay. A cached older page still logs `1.1.2` or older — reload until it
+does not.
 
 The canvas is also owned strictly: the render scale writes the *backing
 store* directly (`devicePixelRatio: 1`, `matchWebGLToCanvasSize: false`, no
@@ -241,7 +243,7 @@ page can export, import and *install* them:
 | Tab disappears during "Loading into memory" | Retry (the data is cached, so it skips the download) and lower the render scale. |
 | The tab vanishes with no message at all | That is jetsam, and it happens too fast for the page to draw. *Menu ▸ Stability* shows the heap the last session died at. |
 | Black screen after the bar | Check the log panel: `saved file is N bytes, expected M` means the download was cut; reload and it resumes. `the data check` lines say if a chunk is wrong. |
-| Black screen with `ERROR frame callback: GPUCanvasContext.configure` (or 0 fps right after boot) | The game booted but could not draw — on Retina Safaris the WebGPU path used to ask for a 9440×5872 render target on an 1180×734 screen. Shell 1.1.1 forces WebGL 2 and pins the buffer, which is the fix; check that the boot log says `shell=1.1.2 WebGL2` (a cached older page logs `1.1.1` or `1.1.0` — reload until it does). A throwing frame raises the recovery overlay. If the engine dies before any frame, the overlay says it never drew a frame; after frames are flowing, later errors only go to the log. |
+| Black screen with `ERROR frame callback: GPUCanvasContext.configure` (or 0 fps right after boot) | The game booted but could not draw — on Retina Safaris the WebGPU path used to ask for a 9440×5872 render target on an 1180×734 screen. Shell 1.1.1 forces WebGL 2 and pins the buffer, which is the fix; check that the boot log says `shell=1.2.0 WebGL2` (a cached older page logs `1.1.2` or older — reload until it does). A throwing frame raises the recovery overlay. If the engine dies before any frame, the overlay says it never drew a frame; after frames are flowing, later errors only go to the log. |
 | `There is not enough free storage` | Free space in *Settings ▸ General ▸ iPad Storage*; the community ZIP alone needs about 1.72 GiB, plus headroom for extracted bundles and Unity. |
 | Loading stops with `HTTP 403 for https://cdn.jsdelivr.net/…/parts/WebGL.zip.partN` | jsDelivr refusing a GitHub *package* over its 150 MB limit — the archive is 1.72 GiB. It refuses only the parts it has not already cached, which is why the download gets a few parts in first. The descriptor serves the parts from `raw.githubusercontent.com` and keeps jsDelivr as a mirror, and a refused part is retried once against that mirror; reload and the download resumes where it stopped. See [COMMUNITY-BUILD.md](COMMUNITY-BUILD.md#two-hosts-for-the-archive-parts). |
 | Loading pauses with `GitHub is rate-limiting the download (HTTP 403) — pausing N min` | GitHub only lets a page that is not signed in download so many files an hour, and the archive has 111 parts. Nothing is lost: the page waits it out (30 s, 1 min, 2 min, 5 min, then 15 min, up to 90 minutes — `?archiveWait=<minutes>`) and carries on by itself. Keep the tab in the foreground; a reload resumes from the parts already saved. See [COMMUNITY-BUILD.md](COMMUNITY-BUILD.md#a-403-in-the-middle-of-the-download). |
@@ -274,21 +276,29 @@ The report has:
 * **Copy diagnostics** — shell version, user agent, last-session summary,
   stage, previous log and current log;
 * **Start in safe mode**, which reloads this same page with
-  `preset=rock_bottom&fps=24&auto=1&downloads=2&bundleCacheMB=64`.
+  `preset=rock_bottom&fps=24&auto=1&downloads=2&bundleCacheMB=64&wasmHeap=1024&bundleStream=1`.
 
 Safe mode is a lower-memory start, not a cache clear. It does not delete
 saves or downloaded game data. A phone or tablet already keeps 3 ZIP parts
 in flight instead of 6 (each part holds a 16 MiB buffer); safe mode drops
-that to 2 and uses the lowest graphics preset. The 512 MB extracted-bundle
-budget is disk in OPFS, not RAM, and is left at 512 unless safe mode asks
-for 64. If the title screen appears only in safe mode, the kill was memory
-pressure. The heap figure and the stage are what separate that from an
-engine failure.
+that to 2, uses the lowest graphics preset, and since shell 1.2.0 also
+declares the lowest rung of the initial-heap ladder (1024 MiB instead of
+1536, growing only as the game allocates) and forces streamed bundle
+delivery on. The 512 MB extracted-bundle budget is disk in OPFS, not RAM,
+and is left at 512 unless safe mode asks for 64. If the title screen
+appears only in safe mode, the kill was memory pressure. The heap figure
+and the stage are what separate that from an engine failure.
 
-The boot log must show `shell=1.1.2 WebGL2`. Gameplay is not established
-until that log is the new shell, FPS is non-zero, and the title screen is
-actually visible. The compiled-in ~2 GiB wasm heap is unchanged — no page
-setting shrinks it, and this shell does not patch the wasm allocator.
+The boot log must show `shell=1.2.0 WebGL2`, a `runtime patches
+requested:` line, `wasm patch wasm-initial-heap: applied` while the
+module compiles, and after the engine starts `engine ready, first scene
+loading` followed by `first frame drawn`. The loading overlay now stays
+up until frames are actually being drawn — engine-ready alone used to
+hide it onto a black canvas while the first scene was still loading, and
+a kill in that window is now recorded at the stage `first scene (engine
+ready, no frame yet)`, so the crash report names the real moment of
+death. Gameplay is not established until those lines are present, FPS is
+non-zero, and the title screen is actually visible.
 
 ## 9. Working on it
 

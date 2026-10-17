@@ -776,6 +776,166 @@ await test('lazy ZIP serves requested bundle data and surfaces a failed part', a
   await failedMount.close();
 });
 
+section('streamed bundle delivery (no in-RAM Blob between ZIP and Unity)');
+
+function patternedBytes(length, seed) {
+  let x = seed;
+  return Uint8Array.from({ length }, () => { x ^= x << 13; x ^= x >>> 17; x ^= x << 5; return x & 255; });
+}
+
+await test('a large bundle streams byte-for-byte, with ranges, suffix ranges and a 416', async () => {
+  const payload = patternedBytes(700 * 1024, 1234567);
+  const writer = new zip.ZipWriter(new zip.BlobWriter('application/zip'), { useWebWorkers: false });
+  await writer.add('aa/WebGL/streamed-big.bundle', new zip.Uint8ArrayReader(payload), { level: 6 });
+  const mount = await community.openArchive(await writer.close(), zip);
+  const target = { fetch: async () => new Response('network fallback') };
+  const restore = community.installFetchMount(target, mount);
+  const url = 'https://game.example/StreamingAssets/aa/WebGL/streamed-big.bundle';
+
+  const full = await target.fetch(url);
+  eq(full.status, 200, 'full streamed response');
+  eq(full.headers.get('content-length'), String(payload.length), 'length declared up front');
+  ok(Buffer.from(await full.arrayBuffer()).equals(Buffer.from(payload)), 'every byte arrived, in order');
+
+  const ranged = await target.fetch(url, { headers: { Range: 'bytes=100000-100099' } });
+  eq(ranged.status, 206, 'ranged streamed response');
+  eq(ranged.headers.get('content-range'), 'bytes 100000-100099/' + payload.length, 'range metadata');
+  ok(Buffer.from(await ranged.arrayBuffer()).equals(Buffer.from(payload.subarray(100000, 100100))), 'exactly the middle slice');
+
+  const suffix = await target.fetch(url, { headers: { Range: 'bytes=-50' } });
+  eq(suffix.status, 206, 'suffix range');
+  ok(Buffer.from(await suffix.arrayBuffer()).equals(Buffer.from(payload.subarray(payload.length - 50))), 'exactly the last 50 bytes');
+
+  const open = await target.fetch(url, { headers: { Range: 'bytes=' + (payload.length - 4) + '-' } });
+  eq(open.status, 206, 'open-ended range');
+  eq((await open.arrayBuffer()).byteLength, 4, 'to the end of the entry');
+
+  const hopeless = await target.fetch(url, { headers: { Range: 'bytes=' + payload.length + '-' } });
+  eq(hopeless.status, 416, 'a range past the end is refused without inflating anything');
+  eq(hopeless.headers.get('content-range'), 'bytes */' + payload.length, 'with the real size named');
+
+  const head = await target.fetch(url, { method: 'HEAD' });
+  eq(head.status, 200, 'HEAD still answered from the directory alone');
+  eq(head.headers.get('content-length'), String(payload.length), 'with the entry size');
+  restore();
+
+  // The opt-out serves the same bytes through the old Blob path.
+  const blobTarget = { fetch: async () => new Response('network fallback') };
+  const restoreBlob = community.installFetchMount(blobTarget, mount, { streamBundles: false });
+  const viaBlob = await blobTarget.fetch(url, { headers: { Range: 'bytes=2-5' } });
+  eq(viaBlob.status, 206, 'the Blob fallback still ranges');
+  ok(Buffer.from(await viaBlob.arrayBuffer()).equals(Buffer.from(payload.subarray(2, 6))), 'with the same bytes');
+  restoreBlob();
+  await mount.close();
+});
+
+/** A fake ZIP entry whose inflation the test controls chunk by chunk. */
+function fakeEntry({ chunkCount = 64, chunkSize = 16 * 1024, failAtChunk = -1, failure = null } = {}) {
+  const written = { chunks: 0 };
+  const entry = {
+    filename: 'aa/WebGL/fake-stream.bundle',
+    uncompressedSize: chunkCount * chunkSize,
+    compressedSize: chunkCount * chunkSize,
+    signature: 0,
+    directory: false,
+    async getData(writer) {
+      for (let i = 0; i < chunkCount; i++) {
+        if (i === failAtChunk) throw failure || new Error('CRC mismatch (fake)');
+        await writer.writeUint8Array(new Uint8Array(chunkSize).fill(i & 255));
+        written.chunks++;
+      }
+      return writer.getData ? writer.getData() : null;
+    },
+  };
+  return { entry, written };
+}
+
+async function fakeMount(entry, options = {}) {
+  return community.openArchive(new Blob([]), zip, { entries: [entry], ...options });
+}
+
+await test('backpressure reaches the inflater: a slow reader does not let chunks pile up', async () => {
+  const { entry, written } = fakeEntry();
+  const mount = await fakeMount(entry);
+  const response = await mount.responseFor(entry, null, {});
+  eq(response.status, 200, 'the response starts once the first chunk exists');
+  // Nobody is reading the body. If delivery were still Blob-shaped, all
+  // 64 chunks would already be written (that accumulation is exactly the
+  // RAM this path exists not to spend).
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  ok(written.chunks <= 4, 'inflation is parked waiting for the reader (' + written.chunks + ' of 64 chunks written)');
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  eq(bytes.length, entry.uncompressedSize, 'reading drains the whole entry');
+  eq(written.chunks, 64, 'every chunk written by the end');
+  eq(bytes[0], 0, 'first chunk value');
+  eq(bytes[bytes.length - 1], 63, 'last chunk value');
+  await mount.close();
+});
+
+await test('cancelling a bundle read aborts the inflation and is not an error', async () => {
+  const { entry, written } = fakeEntry();
+  const mount = await fakeMount(entry);
+  const errors = [];
+  const streamed = mount.streamFor(entry, null, { onError: (e) => errors.push(e) });
+  const reader = streamed.stream.getReader();
+  const first = await reader.read();
+  eq(first.done, false, 'a first chunk arrived');
+  await reader.cancel();
+  const settled = await Promise.race([
+    streamed.done,
+    new Promise((resolve) => setTimeout(() => resolve('timed out'), 2000)),
+  ]);
+  ok(settled !== 'timed out', 'the pump settled after the cancel instead of hanging');
+  eq(settled.cancelled, true, 'reported as a cancel');
+  eq(errors.length, 0, 'a consumer cancel never reaches the bundle-error callback');
+  ok(written.chunks < 64, 'inflation stopped (' + written.chunks + ' of 64 chunks)');
+  await mount.close();
+});
+
+await test('a failure mid-stream errors the body and notifies once; before the first byte it rejects the fetch', async () => {
+  const mid = fakeEntry({ failAtChunk: 3 });
+  const midMount = await fakeMount(mid.entry);
+  const midErrors = [];
+  const midTarget = { fetch: async () => new Response('network fallback') };
+  const restoreMid = community.installFetchMount(midTarget, midMount, {
+    onAssetError: (name, error) => midErrors.push({ name, message: error.message }),
+  });
+  const partial = await midTarget.fetch('https://game.example/StreamingAssets/aa/WebGL/fake-stream.bundle');
+  eq(partial.status, 200, 'headers were already earned by the first chunks');
+  await rejects(partial.arrayBuffer(), /CRC mismatch/, 'reading the damaged body');
+  eq(midErrors.length, 1, 'the page was told exactly once');
+  eq(midErrors[0].name, 'aa/WebGL/fake-stream.bundle', 'and which bundle died');
+  restoreMid();
+  await midMount.close();
+
+  const early = fakeEntry({ failAtChunk: 0, failure: new Error('HTTP 503 for WebGL.zip.part9') });
+  const earlyMount = await fakeMount(early.entry);
+  const earlyErrors = [];
+  const earlyTarget = { fetch: async () => new Response('network fallback') };
+  const restoreEarly = community.installFetchMount(earlyTarget, earlyMount, {
+    onAssetError: (name, error) => earlyErrors.push({ name, message: error.message }),
+  });
+  const message = await rejects(
+    earlyTarget.fetch('https://game.example/StreamingAssets/aa/WebGL/fake-stream.bundle'),
+    /HTTP 503/,
+    'a part that fails before the first byte'
+  );
+  ok(message.includes('part9'), 'the fetch rejection keeps the part error');
+  eq(earlyErrors.length, 1, 'and the page callback fired once, not twice');
+  restoreEarly();
+  await earlyMount.close();
+});
+
+await test('range parsing is shared by both delivery paths', () => {
+  eq(community.parseRangeHeader(null, 100), null, 'no header, no range');
+  eq(community.parseRangeHeader('bytes=-', 100), null, 'an empty range is ignored, not ranged');
+  eq(JSON.stringify(community.parseRangeHeader('bytes=10-19', 100)), JSON.stringify({ start: 10, end: 19 }), 'closed range');
+  eq(JSON.stringify(community.parseRangeHeader('bytes=90-999', 100)), JSON.stringify({ start: 90, end: 99 }), 'clamped to the entry');
+  eq(JSON.stringify(community.parseRangeHeader('bytes=-10', 100)), JSON.stringify({ start: 90, end: 99 }), 'suffix range');
+  eq(community.parseRangeHeader('bytes=100-', 100).unsatisfiable, true, 'starting at the end cannot be served');
+  eq(community.parseRangeHeader('bytes=50-40', 100).unsatisfiable, true, 'backwards cannot be served');
+});
+
 section('the cutscene bypass');
 
 await test('a cutscene is answered with a placeholder container, never with the real video', async () => {

@@ -308,3 +308,38 @@ that element an `href` property that answers with the community asset root
 same StreamingAssets URL the page passes anyway, and the element stays for the
 life of the page in case anything reads it again later.
 `tools/test-page.mjs` runs that exact upstream line against the page.
+
+## The runtime patches (shell 1.2.0)
+
+The pinned module declares a 2048 MiB initial wasm heap, which the browser
+backs at instantiation — on top of the module itself, the first scene's
+bundles and the GPU textures that follow. That is what jetsam-killed the
+tab seconds after `engine ready`. Since shell 1.2.0 the page patches the
+pinned binaries **in the browser, while they load** (`js/unity-startup.js`);
+nothing is re-hosted and the pinned commit does not change:
+
+| Patch | What it does | Verified against |
+| --- | --- | --- |
+| `wasm-initial-heap` | rewrites the memory section's initial-size LEB128 at offset 207746: 32768 pages → 24576 (1536 MiB default; `?wasmHeap=1280` or `1024`; safe mode 1024). The declared 4080 MiB maximum is untouched, so the heap still grows on demand. | inflated size 82,574,276 bytes + the 10-byte section window `05 08 01 01 80 80 02 80 fe 03` at 207742 |
+| `unload-assets-always` | the unique 11-byte context at 52123552 ending in function #106897's `local.get 9; end` tail, forced to return true so room changes unload assets. Structural candidate, not a name lookup — IL2CPP strips names. | full context `20 0c 41 b0 04 6a 24 00 20 09 0b`; the bare tail occurs 309× and is never patched alone |
+| framework `disconnectSource` | the Unity 6 audio-release patch (same output as `tools/patches.mjs`): a stopped channel gives its media-element decoder back instead of pinning it. | framework SHA-256, gzipped `03bf4bc6…` or plain `972cecea…` |
+
+Every patch fails open: a context or digest mismatch is logged
+(`wasm patch … skipped — …`) and the stock bytes load instead. The wasm
+patches ride the verified streaming compile path (the page owns the byte
+stream there); with `?streaming=0` the stock loader fetches the module
+itself and the page logs that the heap starts at its compiled-in 2048 MiB.
+Switches, for A/B-ing on the device: `?wasmHeap=<MiB>` (256–4080),
+`?heapPatch=0`, `?unloadPatch=0`, `?frameworkPatch=0`,
+`?wasmPatch=0`, `?bundleStream=0` (bundles go through an in-RAM Blob
+again instead of a stream). The boot log lines to check:
+`runtime patches requested: …`, then `wasm patch wasm-initial-heap:
+applied`, then `game memory: 1536 MB of wasm heap`.
+
+To host a pre-patched mirror instead (for a browser without the streaming
+path), `tools/patch-community-wasm.mjs` writes patched, still-gzipped
+`w-pt.wasm.unityweb` / `w-pt.framework.js.unityweb` from the pinned files;
+serve the four `Build/` files anywhere static and point
+`?communityBase=` at them. The runtime patcher recognises an
+already-patched mirror and leaves it alone. The 111 asset parts are
+never part of this — they are untouched in both modes.
