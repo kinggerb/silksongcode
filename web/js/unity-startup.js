@@ -8,11 +8,32 @@
   var LOADER_SHA256 = '6705d6c08f287b6dbd825f3e2c73a104af54a782303f00507e0465194753b7c2';
   var HOOK = '}), T("codeUrl")])';
   var GZIP_HOOK = 'hasUnityMarker: function(e) {\n                return true\n            }';
+  // Unity 6 probes WebGPU and, when navigator.gpu answers with an adapter,
+  // points the game at a WebGPU renderer. On the affected iPad (Safari,
+  // Retina) that adapter was found and the game then died inside
+  // `GPUCanvasContext.configure` — "render target: 9440×5872 for a 1180×734
+  // screen" — so not one frame was ever drawn and the tab stayed black at
+  // 0 fps. This build is a WebGL 2 build; the adapter probe below is the
+  // loader's only WebGPU decision point, so it is cut out entirely: no
+  // adapter request is made, and SystemInfo.hasWebGPU is hard-set to false,
+  // before the framework (which reads it to pick the renderer) ever loads.
+  // The exact text is verified against the pinned loader above; a loader
+  // whose digest does not match is never patched at all (see prepare()).
+  var WEBGPU_PROBE = 'navigator.gpu ? navigator.gpu.requestAdapter().then(function(e) {\n' +
+    '                b.SystemInfo.hasWebGPU = !!e,\n' +
+    '                t(b.SystemInfo.hasWebGPU)\n' +
+    '            }) : t(!1)';
+  var WEBGPU_PATCHED = 'b.SystemInfo.hasWebGPU = !1,\n' +
+    '                t(!1)';
   function patchLoader(text, streaming) {
-    if (text.split(HOOK).length !== 2 || text.split(GZIP_HOOK).length !== 2) throw new Error('unsupported Unity loader: compression/streaming hook is not unique');
+    if (text.split(HOOK).length !== 2 || text.split(GZIP_HOOK).length !== 2 || text.split(WEBGPU_PROBE).length !== 2) throw new Error('unsupported Unity loader: compression/streaming hook is not unique');
     // Upstream hard-codes this predicate to true. Native HTTP-decoded JS/data
     // would otherwise be inflated AGAIN into undefined/corrupt bytes.
     text = text.replace(GZIP_HOOK, 'hasUnityMarker: function(e) { return e && e.length > 2 && e[0] === 31 && e[1] === 139; }');
+    // Force the WebGL 2 renderer in BOTH Wasm modes: without the adapter
+    // request the probe resolves immediately, exactly as on a browser with
+    // no navigator.gpu at all, and startup continues through the same .then.
+    text = text.replace(WEBGPU_PROBE, WEBGPU_PATCHED);
     return streaming === false ? text : text.replace(HOOK, '}), b.instantiateWasm ? Promise.resolve(null) : T("codeUrl")])');
   }
   async function wasmResponse(response) {
@@ -106,12 +127,15 @@
       };
       runtime.loaderUrl = objectUrl;
       runtime.dispose = function () { compiled = null; URL.revokeObjectURL(objectUrl); };
-      log(wantStreaming ? 'Wasm compiled with native streaming in ' + (Date.now() - start) + ' ms (overlapped with asset setup)' : 'verified loader: native HTTP decoding guard enabled; stock Wasm path');
+      log(wantStreaming
+        ? 'Wasm compiled with native streaming in ' + (Date.now() - start) + ' ms (overlapped with asset setup); verified loader forces WebGL 2 (WebGPU probe removed)'
+        : 'verified loader: WebGL 2 forced (WebGPU probe removed), native HTTP decoding guard enabled; stock Wasm path');
     } catch (error) {
       controller.abort();
       compiled = null;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
-      log('native streaming unavailable — using the unchanged Unity loader: ' + error.message);
+      log('native streaming unavailable — using the unchanged Unity loader: ' + error.message +
+        ' (the page preRun guard still forces WebGL 2 at startup)');
     }
     clearTimeout(timeout);
     if (options.signal) options.signal.removeEventListener('abort', cancel);

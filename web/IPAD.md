@@ -52,7 +52,7 @@ Current loading changes, controls and validation are documented in
 | Verification | prepared builds probe chunk sizes and sample digests; the community source uses pinned commit IDs, exact ZIP-part sizes and a ZIP directory check | stale or truncated files fail before Unity uses them |
 | Data | prepared builds can replace cutscenes with ~600-byte black placeholders and omit junk (`prepare-build.mjs`) | reduces the prepared build's download and storage footprint |
 | Memory | render-scale ladder, frame cap, pressure checks, auto-degrade and crash ladder | reduces rendering/pressure; compiled engine memory limits still require a compatible rebuild |
-| Memory | the collector runs every minute, and four times a minute once the heap passes 900 MB | the heap never creeps towards the ceiling |
+| Memory | the collector runs every minute, and four times a minute once the heap passes 900 MB | keeps managed allocations from piling up; the wasm heap size itself is fixed by the pinned binary, not by the page |
 | Audio | a guard relabels iOS's `NotSupportedError` on `play()` as `NotAllowedError`, which is the error Unity waits out | sound starting late no longer kills the game |
 | Room audio | the framework's `disconnectSource` drops the `<audio>` source (`tools/patches.mjs`), and the page sweeps the elements nobody is using | WebKit frees each room's music decoder |
 
@@ -155,14 +155,14 @@ Three numbers decide whether the tab survives the session:
 
 | What | Value | Why |
 | --- | --- | --- |
-| `maximumHeapSize` | 1 GB | the wasm heap is the biggest thing in the tab. The old 1.4 GB let Unity grow into the range where Safari's jetsam killer takes the whole WebContent process down without a chance to draw anything. |
-| `INITIAL_MEMORY` | 16 MB | Emscripten grows the heap in big steps; a small start means the unused first half of the old one is not resident while the game boots. |
+| wasm heap | ~2 GiB, fixed by the pinned binary | the biggest thing in the tab — and **not a page setting**. The pinned community build compiles its heap in; it ignores the `maximumHeapSize`/`INITIAL_MEMORY` hints below, so the "2048 MB of wasm heap" the log reports is real. No HTML setting can turn it into a 1 GB heap, and patching the wasm allocator is not attempted — a wrongly patched allocator corrupts the heap. What works: the render scale (a smaller canvas buffer = less video memory) and the collection cadence. |
+| `maximumHeapSize` / `INITIAL_MEMORY` | 1 GB / 16 MB | kept for a *self-built* standard build, which does honour them: the heap ceiling stays out of the range where Safari's jetsam killer takes the whole WebContent process, and a small start means no RAM is front-loaded while the game boots. The pinned build simply starts at its own compiled-in size. |
 | `webglContextAttributes` | `preserveDrawingBuffer: false`, `desynchronized: true`, `powerPreference: 'low-power'` on a phone | no copy of the drawing buffer is kept for compositing, late frames are dropped instead of queued, and the phone's GPU is not asked for the high-performance path. |
 
 The page **never reloads the tab on its own**. There used to be a hard heap
 cap with a countdown that reloaded the game; on iPadOS that threw the session
 away, re-ran the whole boot and usually lost the race with the system kill
-anyway. The ceiling now lives in the numbers above, and the page only *warns*
+anyway. The heap size is not a page knob any more, and the page only *warns*
 about memory.
 
 Once the heap passes 900 MB the collector runs four times a minute instead of
@@ -170,6 +170,26 @@ once, and it is asked for a full collection: the IL2CPP collector twice in a
 row (the first pass only marks, the second frees), `UnloadUnusedAssets`, and
 the one allocation the page owns in Unity's heap released through
 `Module._free`.
+
+### The renderer, and who owns the canvas size
+
+The shell runs the game on **WebGL 2** even where Safari advertises WebGPU.
+The pinned Unity 6 loader probes `navigator.gpu` and, when an adapter answers,
+points the game at a WebGPU renderer; on the affected iPad that ended in
+`GPUCanvasContext.configure: Unable to configure — render target: 9440×5872
+for a 1180×734 screen` and a black screen at 0 fps. The SHA-verified loader
+patch removes that probe (no adapter request at all, `SystemInfo.hasWebGPU`
+forced false before the framework picks a renderer), and a `preRun` guard
+clears the flag again for any loader that could not be patched. The boot log
+says which shell and renderer you got: `shell=1.1.1 WebGL2`.
+
+The canvas is also owned strictly: the render scale writes the *backing
+store* directly (`devicePixelRatio: 1`, `matchWebGLToCanvasSize: false`, no
+CSS transform — Unity's runtime used to re-measure the transformed CSS box
+and multiply the buffer up). A 25 % render scale on a 1180×734 Retina screen
+is a 295×184 buffer, full stop. Re-applying an unchanged size never rewrites
+the buffer, because an assignment — even with the same numbers — clears the
+WebGL frame already on screen.
 
 ## 6. Touch controls
 
@@ -214,6 +234,7 @@ page can export, import and *install* them:
 | Tab disappears during "Loading into memory" | Retry (the data is cached, so it skips the download) and lower the render scale. |
 | The tab vanishes with no message at all | That is jetsam, and it happens too fast for the page to draw. *Menu ▸ Stability* shows the heap the last session died at. |
 | Black screen after the bar | Check the log panel: `saved file is N bytes, expected M` means the download was cut; reload and it resumes. `the data check` lines say if a chunk is wrong. |
+| Black screen with `ERROR frame callback: GPUCanvasContext.configure` (or 0 fps right after boot) | The game booted but could not draw — on Retina Safaris the WebGPU path used to ask for a 9440×5872 render target on an 1180×734 screen. Shell 1.1.1 forces WebGL 2 and pins the buffer, which is the fix; check that the boot log says `shell=1.1.1 WebGL2` (a cached older page logs `1.1.0` — reload until it does). A throwing frame now raises the recovery overlay instead of failing silently. |
 | `There is not enough free storage` | Free space in *Settings ▸ General ▸ iPad Storage*; the community ZIP alone needs about 1194.1 MB, plus headroom for extracted bundles and Unity. |
 | Loading stops with `HTTP 403 for https://cdn.jsdelivr.net/…/parts/WebGL.zip.partN` | jsDelivr refusing a GitHub *package* over its 150 MB limit — the archive is ~1.19 GB. It refuses only the parts it has not already cached, which is why the download gets a few parts in first. The descriptor serves the parts from `raw.githubusercontent.com` and keeps jsDelivr as a mirror, and a refused part is retried once against that mirror; reload and the download resumes where it stopped. See [COMMUNITY-BUILD.md](COMMUNITY-BUILD.md#two-hosts-for-the-archive-parts). |
 | Loading pauses with `GitHub is rate-limiting the download (HTTP 403) — pausing N min` | GitHub only lets a page that is not signed in download so many files an hour, and the archive is 75 of them. Nothing is lost: the page waits it out (30 s, 1 min, 2 min, 5 min, then 15 min, up to 90 minutes — `?archiveWait=<minutes>`) and carries on by itself. Keep the tab in the foreground; a reload resumes from the parts already saved. See [COMMUNITY-BUILD.md](COMMUNITY-BUILD.md#a-403-in-the-middle-of-the-download). |

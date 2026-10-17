@@ -42,9 +42,9 @@ ok(inlineMatch, 'found the page script');
 const inline = inlineMatch[1];
 const shell = html.replace(inlineMatch[0], '<script id="page-script" type="text/plain"></script>');
 
-function bootPage({ fetchImpl, touch = true, userAgent } = {}) {
+function bootPage({ fetchImpl, touch = true, userAgent, query = '' } = {}) {
   const dom = new JSDOM(shell, {
-    url: 'https://example.test/play.html',
+    url: 'https://example.test/play.html' + query,
     pretendToBeVisual: true,
     runScripts: 'dangerously',
     userAgent: userAgent || (touch ? 'Mozilla/5.0 (iPad; CPU OS 18_0 like Mac OS X) AppleWebKit/605.1.15' : 'Mozilla/5.0 (Macintosh)'),
@@ -146,12 +146,16 @@ await test('the save codec, loader and manifest modules really loaded', () => {
 
 section('the memory ceiling');
 
-await test('the wasm heap is capped below the zone where iPadOS kills the tab', () => {
+await test('the heap size hints are documentation for builds that honour them — the pinned build does not', () => {
   const win = bootPage();
   const config = win.SKPerf.internals().makeUnityConfig('data', 'code', 'framework', 'assets');
-  eq(config.maximumHeapSize, 1073741824, 'the heap may not grow past 1 GB');
+  // These two are what a *self-built* standard build honours. The pinned
+  // community binary compiles in a ~2 GiB heap and ignores both — the
+  // "2048 MB of wasm heap" the iPad reports is real — so the page must not
+  // pretend they cap anything. They stay for their honest audience only.
+  eq(config.maximumHeapSize, 1073741824, 'a build that honours it gets the 1 GB ceiling');
   ok(config.maximumHeapSize < 1468006400, 'which is below the old 1.4 GB');
-  eq(config.INITIAL_MEMORY, 16777216, 'and the heap starts at 16 MB, not 32');
+  eq(config.INITIAL_MEMORY, 16777216, 'and such a build starts at 16 MB, not 32');
   ok(config.INITIAL_MEMORY < 33554432, 'so no RAM is front-loaded');
   win.close();
 });
@@ -367,9 +371,131 @@ await test('the community loader finds the <base> it was written for, and the pa
   win.close();
 });
 
+/* Boots the page through the stubbed community loader all the way to
+ * `completeUnityBoot` (the loading overlay hidden, Unity "running"), the
+ * state the reported iPad failure happened in. `arm` runs inside the page
+ * right before Start is clicked, so a failure can be planted that only
+ * fires once the boot is under way. */
+async function bootToUnity({ arm, expectFailure = false } = {}) {
+  const source = JSON.parse(fs.readFileSync(path.join(WEB, 'community-build.json'), 'utf8'));
+  const fetchImpl = async (url) => {
+    const clean = String(url).replace(/^https?:\/\/[^/]+\//, '');
+    if (clean === 'community-build.json') return { ok: true, status: 200, json: async () => source };
+    return { ok: false, status: 404, headers: new Map(), text: async () => '' };
+  };
+  const win = bootPage({ fetchImpl });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  win.SKStream.detect = async () => ({ opfs: true, available: 4e9, quota: 5e9, usage: 0, secure: true });
+  win.SKCommunityBuild.ensureArchive = async () => ({ file: new win.Blob(['zip']), dispose() {} });
+  win.SKCommunityBuild.openArchive = async () => ({ entryCount: 1, entryFor: () => null, blobFor: async () => null, close() {} });
+  win.SKCommunityBuild.openLazyArchive = win.SKCommunityBuild.openArchive;
+  const loaderUrl = source.base + source.unity.loader;
+  const append = win.document.body.appendChild.bind(win.document.body);
+  win.document.body.appendChild = (node) => {
+    if (node && node.tagName === 'SCRIPT' && node.src === loaderUrl) {
+      win.eval(UPSTREAM_LOADER);
+      setTimeout(() => node.onload && node.onload(), 0);
+      return node;
+    }
+    return append(node);
+  };
+  if (arm) arm(win);
+  win.document.getElementById('startBtn').click();
+  const errEl = win.document.getElementById('err');
+  const failure = () => (!errEl.classList.contains('hidden') && errEl.textContent.trim().split('\n')[0]) || '';
+  for (let i = 0; i < 400 && !win.unityInstance && !failure(); i++) await new Promise((resolve) => setTimeout(resolve, 5));
+  if (!expectFailure) {
+    eq(failure(), '', 'the start failed with');
+    ok(win.unityInstance, 'Unity was started');
+  }
+  return win;
+}
+
+/** Releases every frame the page has queued, with timestamps that pass the
+ * frame limiter's spacing. Returns how many callbacks ran. */
+function pumpFrames(win, tick = 34) {
+  let now = 1000;
+  let ran = 0;
+  while (win.__frames.length) {
+    now += tick;
+    const batch = win.__frames.splice(0);
+    for (const cb of batch) { cb(now); ran++; }
+  }
+  return ran;
+}
+
+await test('a graphics frame failure surfaces in the recovery overlay instead of a silent 0 fps black screen', async () => {
+  // A throwing frame callback before the game is up is only a log line —
+  // the start screen is still there to explain things.
+  let early = null;
+  const win = await bootToUnity({
+    arm(next) {
+      next.eval("requestAnimationFrame(function () { throw new Error('GPUCanvasContext.configure: too early'); })");
+      eq(pumpFrames(next) > 0, true, 'the queued callback ran');
+      early = {
+        overlayHidden: next.document.getElementById('recover').classList.contains('hidden'),
+        logged: next.document.getElementById('logbox').textContent.includes('frame callback: GPUCanvasContext.configure: too early'),
+      };
+    },
+  });
+  ok(early.overlayHidden, 'before boot the overlay stays down');
+  ok(early.logged, 'and the failure is only logged');
+
+  // After boot the same failure is what the iPad saw: the loading overlay
+  // is gone, every frame dies in the same configure error and nothing else
+  // would ever tell the player. It must raise the recovery overlay.
+  const recover = win.document.getElementById('recover');
+  const recoverMsg = win.document.getElementById('recoverMsg');
+  ok(recover.classList.contains('hidden'), 'the overlay still starts hidden after a clean boot');
+  win.eval("requestAnimationFrame(function () { throw new Error('GPUCanvasContext.configure: Unable to configure. render target: 9440×5872 for a 1180×734 screen'); })");
+  pumpFrames(win);
+  ok(!recover.classList.contains('hidden'), 'the recovery overlay is up');
+  ok(recoverMsg.textContent.includes('GPUCanvasContext.configure: Unable to configure'), 'and names the graphics failure: ' + recoverMsg.textContent.slice(0, 120));
+  ok(win.document.getElementById('logbox').textContent.includes('ERROR'), 'the failure is still logged');
+  win.close();
+});
+
+await test('a startup failure after the loading overlay was hidden restores the error screen', async () => {
+  // Fail the page's second game-canvas style application. The first happens
+  // when the page initialises; the second happens inside `completeUnityBoot`
+  // — after it has already hidden the loading overlay. That is the late
+  // startup failure (renderer/canvas setup dying after the boot resolved)
+  // that used to leave nothing but a black screen and a log line.
+  const win = await bootToUnity({
+    arm(next) {
+      // Installed after the page has initialised, so the first style write
+      // it sees is the one inside `completeUnityBoot` — which runs right
+      // after the loading overlay was hidden.
+      const canvas = next.document.getElementById('unity-canvas');
+      const realStyle = canvas.style;
+      let widthWrites = 0;
+      Object.defineProperty(canvas, 'style', {
+        configurable: true,
+        get() {
+          return {
+            setProperty: (k, v) => realStyle.setProperty(k, v),
+            get width() { return realStyle.width; },
+            set width(v) { widthWrites++; throw new Error('canvas style exploded'); },
+            set height(v) { realStyle.height = v; },
+            set transform(v) { realStyle.transform = v; },
+          };
+        },
+      });
+    },
+    expectFailure: true,
+  });
+  ok(win.unityInstance, 'Unity itself got as far as starting');
+  const errEl = win.document.getElementById('err');
+  ok(!win.document.getElementById('screen').classList.contains('hidden'), 'the start screen came back');
+  ok(!errEl.classList.contains('hidden'), 'the error text is shown');
+  ok(errEl.textContent.includes('canvas style exploded'), 'and names what failed: ' + errEl.textContent.split('\n')[0]);
+  eq(win.document.getElementById('startBtn').textContent, 'Try again', 'Start offers a reload');
+  win.close();
+});
+
 section('render scale and frame cap');
 
-await test('the canvas shrinks with the render scale and is stretched back with CSS', () => {
+await test('the render scale owns the backing store; full-viewport CSS owns the display size', () => {
   const win = bootPage();
   win.innerWidth = 1024;
   win.innerHeight = 768;
@@ -378,7 +504,69 @@ await test('the canvas shrinks with the render scale and is stretched back with 
   const canvas = win.document.getElementById('unity-canvas');
   eq(canvas.width, Math.round(1024 * 0.55), 'backing store is 55 % wide');
   eq(canvas.height, Math.round(768 * 0.55), 'and 55 % tall');
-  ok(/scale\(1\.8182\)/.test(canvas.style.transform), 'CSS scales it back up: ' + canvas.style.transform);
+  eq(canvas.style.width, '100%', 'plain CSS fills the viewport for display');
+  eq(canvas.style.height, '100%', 'vertically too');
+  eq(canvas.style.transform, 'none', 'and there is deliberately no CSS transform for Unity to mis-measure');
+  win.close();
+});
+
+await test('the reported iPad scene: 25 % on a 1180×734 Retina screen stays 295×184, and Unity is told not to resize', () => {
+  const win = bootPage({ query: '?scale=0.25' });
+  win.innerWidth = 1180;
+  win.innerHeight = 734;
+  const internals = win.SKPerf.internals();
+  internals.applyResolution();
+  const canvas = win.document.getElementById('unity-canvas');
+  eq(canvas.width, 295, 'the buffer is 295 px wide');
+  eq(canvas.height, 184, 'and 184 px tall — not 9440×5872');
+  ok(canvas.width < win.innerWidth && canvas.height < win.innerHeight, 'the buffer stays inside the viewport');
+  eq(canvas.style.width, '100%', 'plain CSS fills the viewport for display');
+  eq(canvas.style.transform, 'none', 'with no CSS transform for Unity to mis-measure');
+
+  // What kept Unity's runtime from re-multiplying the size back up.
+  const config = internals.makeUnityConfig('d', 'c', 'f', 'a');
+  eq(config.devicePixelRatio, 1, 'devicePixelRatio is forced to 1 — no Retina multiplication');
+  eq(config.matchWebGLToCanvasSize, false, 'Unity does not size the buffer from the CSS box');
+
+  // Fallback renderer selection: a loader that could not be text-patched
+  // still gets WebGL 2, cleared from preRun before Unity's main starts.
+  ok(Array.isArray(config.preRun) && config.preRun.length === 1, 'exactly one preRun guard');
+  const flagged = { SystemInfo: { hasWebGPU: 1 } };
+  config.preRun[0](flagged);
+  eq(flagged.SystemInfo.hasWebGPU, false, 'the guard clears a WebGPU-flagged SystemInfo');
+  config.preRun[0]({ SystemInfo: { hasWebGPU: false } });
+  config.preRun[0]({});
+  ok(true, 'and it tolerates modules without WebGPU state');
+
+  // Assigning canvas.width/height — even the same numbers — clears the
+  // WebGL drawing buffer, so re-applying an unchanged size must not write
+  // it again: the frame already on screen has to survive. Spy on the
+  // setters to prove the re-apply is a no-op.
+  const descriptor = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(canvas), 'width');
+  const heightDescriptor = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(canvas), 'height');
+  let writes = 0;
+  Object.defineProperty(canvas, 'width', {
+    configurable: true,
+    get() { return descriptor.get.call(this); },
+    set(v) { writes++; descriptor.set.call(this, v); },
+  });
+  Object.defineProperty(canvas, 'height', {
+    configurable: true,
+    get() { return heightDescriptor.get.call(this); },
+    set(v) { writes++; heightDescriptor.set.call(this, v); },
+  });
+  internals.applyResolution();
+  eq(writes, 0, 'an unchanged size is never reassigned — the drawn frame survives');
+  eq(canvas.width, 295, 'and the buffer kept its width');
+  eq(canvas.height, 184, 'and its height');
+  win.innerWidth = 800;
+  internals.applyResolution();
+  ok(writes >= 1, 'a real size change still reassigns');
+  eq(canvas.width, 200, 'to follow the viewport');
+
+  // The device log says which shell is running.
+  const log = win.document.getElementById('logbox').textContent;
+  ok(/shell=1\.1\.1 WebGL2/.test(log), 'the menu log shows the shell and renderer: ' + (log.split('\n').find((l) => l.includes('shell=')) || '').trim());
   win.close();
 });
 
