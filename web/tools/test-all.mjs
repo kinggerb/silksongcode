@@ -20,6 +20,7 @@ const suites = [
   ['community build adapter', 'test-community-build.mjs'],
   ['the smaller archive', 'test-zip-plan.mjs'],
   ['unity archive + patches', 'test-webdata.mjs'],
+  ['wasm heap + framework patches', 'test-wasm-patch.mjs'],
   ['save codec', 'test-save-codec.mjs'],
   ['prepare → verify pipeline', 'test-pipeline.mjs'],
   ['page (jsdom)', 'test-page.mjs'],

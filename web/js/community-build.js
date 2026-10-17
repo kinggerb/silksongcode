@@ -1179,6 +1179,47 @@
 
     var inFlight = Object.create(null);
 
+    function statusFor(entry) {
+      if (options.onStatus) options.onStatus('Loading ' + basename(String(entry.filename || '')).replace(/_[a-f0-9]{20,}/g, '') + '…');
+    }
+
+    // Prefetch only the compressed extent of the bundle Unity requested.
+    // Reader slices remain small, while network parts fill the connection.
+    function startPrefetch(entry) {
+      var prefetch = file.prefetchEntry ? file.prefetchEntry(entry) : null;
+      if (prefetch) prefetch.catch(function () {});
+      return prefetch;
+    }
+
+    // A bundle that is already a file somewhere cheap: the extracted-bundle
+    // cache on OPFS, or a directly hosted bundle downloaded to OPFS and
+    // CRC-checked. Both come back as a File the browser can stream from
+    // disk — serving one never puts the bundle in the JS heap.
+    async function cachedFileFor(entry) {
+      var cached = options.bundleCache ? await options.bundleCache.get(entry) : null;
+      if (cached) return cached;
+      if (options.bundleBase) {
+        var direct = await options.stream.ensureDataset({
+          parts: [{ url: join(options.bundleBase, entry.filename.split('/').map(encodeURIComponent).join('/')), bytes: entry.uncompressedSize }],
+          expectedSize: entry.uncompressedSize,
+          cacheKey: 'direct-' + options.buildId + '-' + encodeURIComponent(entry.filename),
+          buildId: options.buildId, mime: 'application/octet-stream',
+          workerUrl: options.workerUrl || 'js/writer.js', preferDisk: true, allowMemoryFallback: false,
+          fetchImpl: options.fetchImpl, onLog: options.onLog, signal: options.signal,
+          stallTimeoutMs: options.stallTimeoutMs,
+        });
+        try {
+          if (await crc32File(direct.file) !== entry.signature) {
+            direct.dispose();
+            await options.stream.removeDataset('direct-' + options.buildId + '-' + encodeURIComponent(entry.filename));
+            throw fail('direct bundle CRC mismatch: ' + entry.filename);
+          }
+          return direct.file;
+        } finally { direct.dispose(); }
+      }
+      return null;
+    }
+
     function entryFor(url) {
       var parsed;
       try { parsed = new URL(String(url), (typeof location !== 'undefined' && location.href) || 'https://silksong.invalid/'); }
@@ -1201,32 +1242,10 @@
       if (inFlight[key]) return inFlight[key];
       var promise = (async function () {
         var start = Date.now();
-        if (options.onStatus) options.onStatus('Loading ' + basename(key).replace(/_[a-f0-9]{20,}/g, '') + '…');
-        var cached = options.bundleCache ? await options.bundleCache.get(entry) : null;
+        statusFor(entry);
+        var cached = await cachedFileFor(entry);
         if (cached) return cached;
-        if (options.bundleBase) {
-          var direct = await options.stream.ensureDataset({
-            parts: [{ url: join(options.bundleBase, entry.filename.split('/').map(encodeURIComponent).join('/')), bytes: entry.uncompressedSize }],
-            expectedSize: entry.uncompressedSize,
-            cacheKey: 'direct-' + options.buildId + '-' + encodeURIComponent(entry.filename),
-            buildId: options.buildId, mime: 'application/octet-stream',
-            workerUrl: options.workerUrl || 'js/writer.js', preferDisk: true, allowMemoryFallback: false,
-            fetchImpl: options.fetchImpl, onLog: options.onLog, signal: options.signal,
-            stallTimeoutMs: options.stallTimeoutMs,
-          });
-          try {
-            if (await crc32File(direct.file) !== entry.signature) {
-              direct.dispose();
-              await options.stream.removeDataset('direct-' + options.buildId + '-' + encodeURIComponent(entry.filename));
-              throw fail('direct bundle CRC mismatch: ' + entry.filename);
-            }
-            return direct.file;
-          } finally { direct.dispose(); }
-        }
-        // Prefetch only the compressed extent of the bundle Unity requested.
-        // Reader slices remain small, while network parts fill the connection.
-        var prefetch = file.prefetchEntry ? file.prefetchEntry(entry) : null;
-        if (prefetch) prefetch.catch(function () {});
+        var prefetch = startPrefetch(entry);
         var blob;
         if (options.bundleCache) blob = await options.bundleCache.extract(entry, zipLib);
         if (!blob) blob = await entry.getData(new zipLib.BlobWriter('application/octet-stream'), {
@@ -1240,9 +1259,197 @@
       try { return await promise; } finally { delete inFlight[key]; }
     }
 
+    /* ---------------------------------------------------------------- *
+     * Streaming a bundle instead of materialising it
+     *
+     * `blobFor`'s fallback is zip.js's BlobWriter, which accumulates
+     * every inflated chunk in the JS heap and builds one Blob from
+     * them: the whole decompressed bundle — up to ~1 GiB for the
+     * all-scenes bundle — sits in RAM *in addition to* the copy Unity
+     * is reading into the wasm heap. On the iPad that duplication is
+     * the difference between booting and being jetsam-killed two
+     * seconds after the engine reports ready.
+     *
+     * `streamFor` pumps the same zip.js inflation through a custom
+     * Writer straight into a ReadableStream. zip.js awaits each
+     * `writeUint8Array`, and the writer awaits the stream's pull when
+     * the queue is full, so backpressure runs the whole way from
+     * Unity's reader to the deflate decoder: at most a couple of
+     * 256 KiB chunks are ever in flight. `checkSignature` keeps the
+     * CRC check (it runs inside zip.js's pipeline, at end of entry),
+     * and a ranged request decompresses-and-discards exactly like a
+     * full read, so a range still proves the whole entry's CRC.
+     *
+     * Error timing is preserved where it matters: `firstReady` does
+     * not settle until the first chunk is queued (or the entry ends),
+     * so a part that fails up front still rejects the fetch itself
+     * instead of surfacing as a truncated body — the behaviour the
+     * page's bundle-error UI was built around. A failure mid-stream
+     * errors the body and is reported through `onError` exactly once;
+     * a consumer cancel aborts the inflation and is not an error.
+     * ---------------------------------------------------------------- */
+    function streamFor(entry, range, callOptions) {
+      callOptions = callOptions || {};
+      var key = String(entry.filename || '');
+      var startAt = Date.now();
+      var size = Number(entry.uncompressedSize || 0);
+      var from = range ? range.start : 0;
+      var to = range ? range.end : size - 1;      // inclusive
+      var controllerRef = null;
+      var cancelled = false;
+      var pullWaiters = [];
+      var abort = typeof AbortController === 'function' ? new AbortController() : null;
+      var firstResolve, firstReject, doneResolve;
+      var firstReady = new Promise(function (resolve, reject) { firstResolve = resolve; firstReject = reject; });
+      firstReady.catch(function () {});
+      var done = new Promise(function (resolve) { doneResolve = resolve; });
+      var firstSettled = false;
+      function settleFirst(error) {
+        if (firstSettled) return;
+        firstSettled = true;
+        if (error) firstReject(error); else firstResolve();
+      }
+      function wakePulls() {
+        var waiters = pullWaiters;
+        pullWaiters = [];
+        waiters.forEach(function (resolve) { resolve(); });
+      }
+      function abortError() {
+        var error = new Error('bundle stream cancelled: ' + key);
+        error.name = 'AbortError';
+        return error;
+      }
+      var stream = new ReadableStream({
+        start: function (controller) { controllerRef = controller; pump(); },
+        pull: function () { wakePulls(); },
+        cancel: function (reason) {
+          cancelled = true;
+          wakePulls();
+          if (abort) abort.abort(reason);
+        },
+      }, { highWaterMark: 1 });
+
+      async function pump() {
+        var pos = 0;
+        var delivered = 0;
+        try {
+          statusFor(entry);
+          var prefetch = callOptions.prefetch || startPrefetch(entry);
+          var writer = new zipLib.Writer();
+          writer.writeUint8Array = async function (chunk) {
+            if (cancelled) throw abortError();
+            if (!(chunk instanceof Uint8Array)) chunk = new Uint8Array(chunk);
+            var chunkStart = pos;
+            pos += chunk.length;
+            var sliceFrom = Math.max(from, chunkStart);
+            var sliceTo = Math.min(to + 1, chunkStart + chunk.length);
+            if (sliceTo <= sliceFrom) return;    // ranged read: decompressed, discarded
+            while (controllerRef && typeof controllerRef.desiredSize === 'number' && controllerRef.desiredSize <= 0 && !cancelled) {
+              await new Promise(function (resolve) { pullWaiters.push(resolve); });
+            }
+            if (cancelled) throw abortError();
+            controllerRef.enqueue(chunk.subarray(sliceFrom - chunkStart, sliceTo - chunkStart));
+            delivered += sliceTo - sliceFrom;
+            settleFirst(null);
+          };
+          writer.getData = function () { return Promise.resolve(null); };
+          await entry.getData(writer, {
+            useWebWorkers: false, checkSignature: true,
+            signal: abort ? abort.signal : undefined,
+          });
+          if (prefetch) await prefetch;
+          if (cancelled) throw abortError();
+          if (Number.isSafeInteger(size) && size >= 0 && pos !== size) {
+            throw fail('ZIP entry size mismatch for ' + key + ': inflated ' + pos + ' of ' + size + ' bytes');
+          }
+          var expectedDelivered = Math.max(0, to - from + 1);
+          if (size > 0 && delivered !== expectedDelivered) {
+            throw fail('ZIP entry range mismatch for ' + key + ': delivered ' + delivered + ' of ' + expectedDelivered + ' bytes');
+          }
+          settleFirst(null);
+          try { controllerRef.close(); } catch (e) {}
+          if (options.onLog) options.onLog('bundle ready: ' + key + ' (' + size + ' bytes, ' + (Date.now() - startAt) + ' ms, streamed)');
+          doneResolve({ bytes: pos, delivered: delivered, cancelled: false });
+        } catch (error) {
+          if (cancelled || (error && error.name === 'AbortError' && abort && abort.signal.aborted)) {
+            settleFirst(abortError());
+            doneResolve({ bytes: pos, delivered: delivered, cancelled: true });
+            return;
+          }
+          settleFirst(error);
+          try { controllerRef.error(error); } catch (e) {}
+          if (typeof callOptions.onError === 'function') {
+            try { callOptions.onError(error); } catch (e) {}
+          }
+          doneResolve({ bytes: pos, delivered: delivered, cancelled: false, error: error });
+        }
+      }
+      return { stream: stream, firstReady: firstReady, done: done, size: size, start: from, end: to };
+    }
+
+    /**
+     * The fetch-mount answer for one entry: a disk-backed File when one
+     * is already available (served by slice, never loaded into RAM),
+     * otherwise the streaming inflation above. `callOptions.onError`
+     * fires exactly once per failure, at whichever stage it happens;
+     * a failure before the first byte also rejects this promise, so
+     * the fetch itself rejects like the Blob path always did.
+     */
+    async function responseFor(entry, rangeHeader, callOptions) {
+      callOptions = callOptions || {};
+      var onError = typeof callOptions.onError === 'function' ? callOptions.onError : null;
+      var reported = false;
+      function report(error) {
+        if (reported || !onError) return;
+        reported = true;
+        try { onError(error); } catch (e) {}
+      }
+      var size = Number(entry.uncompressedSize || 0);
+      var range = parseRangeHeader(rangeHeader, size);
+      if (range && range.unsatisfiable) return rangeNotSatisfiable(size);
+      try {
+        var cached = await cachedFileFor(entry);
+        if (cached) return rangeResponse(cached, rangeHeader);
+        if (!entry || typeof entry.getData !== 'function') throw fail('the ZIP entry cannot be read: ' + (entry && entry.filename));
+        var startAt = Date.now();
+        var prefetch = startPrefetch(entry);
+        if (options.bundleCache) {
+          var extracted = await options.bundleCache.extract(entry, zipLib);
+          if (extracted) {
+            if (prefetch) await prefetch;
+            if (options.onLog) options.onLog('bundle ready: ' + String(entry.filename || '') + ' (' + extracted.size + ' bytes, ' + (Date.now() - startAt) + ' ms)');
+            return rangeResponse(extracted, rangeHeader);
+          }
+        }
+        if (typeof ReadableStream !== 'function' || !zipLib.Writer) {
+          // No streams in this browser: the old Blob answer, unchanged.
+          var blob = await blobFor(entry);
+          return rangeResponse(blob, rangeHeader);
+        }
+        var streamed = streamFor(entry, range, { onError: report, prefetch: prefetch });
+        await streamed.firstReady;    // a part that fails up front rejects the fetch itself
+        var headers = new Headers({
+          'Content-Type': 'application/octet-stream',
+          'Accept-Ranges': 'bytes',
+        });
+        if (range) {
+          headers.set('Content-Range', 'bytes ' + range.start + '-' + range.end + '/' + size);
+          headers.set('Content-Length', String(range.end - range.start + 1));
+          return new Response(streamed.stream, { status: 206, headers: headers });
+        }
+        headers.set('Content-Length', String(size));
+        return new Response(streamed.stream, { status: 200, headers: headers });
+      } catch (error) {
+        report(error);
+        throw error;
+      }
+    }
+
     return {
       entryFor: entryFor,
       blobFor: blobFor,
+      streamFor: streamFor,
+      responseFor: responseFor,
       entryCount: entries.length,
       entries: entries,
       stats: file.stats || null,
@@ -1328,6 +1535,25 @@
             if (!match) throw fail('recovered archive is missing ' + entry.filename);
             return replacement.blobFor(match);
           };
+          // A legacy monolithic ZIP is the one source that can turn out
+          // to be corrupt in a way only the end-of-entry CRC reveals —
+          // and a streamed response has already delivered its bytes by
+          // then, so recovery could never take over mid-body. Route
+          // this mount's responses through the fully-validating
+          // blobFor above (which performs the recovery); the part-based
+          // replacement it recovers into streams normally.
+          mounted.responseFor = async function (entry, rangeHeader, callOptions) {
+            try {
+              var blob = await mounted.blobFor(entry);
+              return rangeResponse(blob, rangeHeader);
+            } catch (error) {
+              if (callOptions && typeof callOptions.onError === 'function') {
+                try { callOptions.onError(error); } catch (e) {}
+              }
+              throw error;
+            }
+          };
+          mounted.streamFor = null;
           var closeOriginal = mounted.close;
           mounted.close = async function () {
             await closeOriginal();
@@ -1350,33 +1576,55 @@
     return openArchive(input, options.zip, archiveOptions);
   }
 
+  /**
+   * Parse a single `Range: bytes=…` header against a known size.
+   * Returns null for "no (usable) range — serve everything",
+   * `{start, end}` (inclusive, clamped) for a satisfiable range, and
+   * `{unsatisfiable: true}` for one that cannot be served. The Blob
+   * path and the streaming path share this so the two can never
+   * disagree about what a request asked for.
+   */
+  function parseRangeHeader(rangeHeader, size) {
+    var range = /^bytes=(\d*)-(\d*)$/i.exec(String(rangeHeader || ''));
+    if (!range || (!range[1] && !range[2])) return null;
+    var start, end;
+    if (!range[1] && range[2]) {
+      var suffixBytes = Number(range[2]);
+      start = Number.isSafeInteger(suffixBytes) && suffixBytes > 0 ? Math.max(0, size - suffixBytes) : size;
+      end = size - 1;
+    } else {
+      start = range[1] ? Number(range[1]) : 0;
+      end = range[2] ? Number(range[2]) : size - 1;
+    }
+    if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end < start || start >= size) {
+      return { unsatisfiable: true };
+    }
+    return { start: start, end: Math.min(end, size - 1) };
+  }
+
+  function rangeNotSatisfiable(size, contentType) {
+    var headers = new Headers({
+      'Content-Type': contentType || 'application/octet-stream',
+      'Accept-Ranges': 'bytes',
+      'Content-Range': 'bytes */' + size,
+    });
+    return new Response(null, { status: 416, headers: headers });
+  }
+
   function rangeResponse(blob, rangeHeader, contentType) {
     var headers = new Headers({
       'Content-Type': contentType || 'application/octet-stream',
       'Accept-Ranges': 'bytes',
     });
-    var range = /^bytes=(\d*)-(\d*)$/i.exec(String(rangeHeader || ''));
+    var range = parseRangeHeader(rangeHeader, blob.size);
     if (!range) {
       headers.set('Content-Length', String(blob.size));
       return new Response(blob, { status: 200, headers: headers });
     }
-    var start, end;
-    if (!range[1] && range[2]) {
-      var suffixBytes = Number(range[2]);
-      start = Number.isSafeInteger(suffixBytes) && suffixBytes > 0 ? Math.max(0, blob.size - suffixBytes) : blob.size;
-      end = blob.size - 1;
-    } else {
-      start = range[1] ? Number(range[1]) : 0;
-      end = range[2] ? Number(range[2]) : blob.size - 1;
-    }
-    if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end < start || start >= blob.size) {
-      headers.set('Content-Range', 'bytes */' + blob.size);
-      return new Response(null, { status: 416, headers: headers });
-    }
-    end = Math.min(end, blob.size - 1);
-    headers.set('Content-Range', 'bytes ' + start + '-' + end + '/' + blob.size);
-    headers.set('Content-Length', String(end - start + 1));
-    return new Response(blob.slice(start, end + 1), { status: 206, headers: headers });
+    if (range.unsatisfiable) return rangeNotSatisfiable(blob.size, contentType);
+    headers.set('Content-Range', 'bytes ' + range.start + '-' + range.end + '/' + blob.size);
+    headers.set('Content-Length', String(range.end - range.start + 1));
+    return new Response(blob.slice(range.start, range.end + 1), { status: 206, headers: headers });
   }
 
   function installFetchMount(target, archive, options) {
@@ -1461,6 +1709,19 @@
       } catch (e) {}
 
       onAsset(entry.filename);
+      // Streamed delivery is the default: the bundle is inflated chunk
+      // by chunk into the response instead of being built as one Blob
+      // in the JS heap first (see streamFor). `streamBundles: false`
+      // (the page's ?bundleStream=0) keeps the old Blob answer, and a
+      // mount without responseFor (older callers, test fakes) takes
+      // the same fallback.
+      if (options.streamBundles !== false && typeof archive.responseFor === 'function') {
+        return archive.responseFor(entry, rangeHeader, {
+          onError: function (error) {
+            try { onAssetError(entry.filename, error); } catch (callbackError) {}
+          },
+        });
+      }
       return archive.blobFor(entry).then(function (blob) {
         return rangeResponse(blob, rangeHeader);
       }).catch(function (error) {
@@ -1486,6 +1747,9 @@
     crc32File: crc32File,
     validateBundleIndex: validateBundleIndex,
     installFetchMount: installFetchMount,
+    // Exported for the test suite: the range math both delivery paths share.
+    parseRangeHeader: parseRangeHeader,
+    rangeResponse: rangeResponse,
     // Exported for the test suite: the fetch `ensureArchive` downloads with,
     // which asks the descriptor's mirror once when the archive's own host
     // refuses a part (or cannot be reached at all).

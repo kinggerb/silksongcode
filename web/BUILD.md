@@ -122,9 +122,15 @@ Some of the iPad-relevant fixes have to happen *inside* the build. Two kinds:
 * *release the audio source*: `channel.disconnectSource` pauses the
   `mediaElement`, drops its `src` attribute, clears `mediaElement.src` and
   calls `load()`, and drops the framework's own pending-autoplay entry.
-  Without it WebKit keeps every room's music decoder alive. The page is the
-  backstop: it sweeps the media elements that are not playing and have nothing
-  loaded, and gives their source back too.
+  Without it WebKit keeps every room's music decoder alive. Unity 6
+  frameworks spell the same function differently and track a pending
+  `play()` promise instead; the patch covers that shape too and defers
+  the release until the promise settles, because touching `src` while a
+  `play()` is in flight throws `AbortError`. The runtime shell applies
+  the identical patch to the SHA-verified pinned framework
+  (`js/unity-startup.js`). The page is the backstop: it sweeps the media
+  elements that are not playing and have nothing loaded, and gives their
+  source back too.
 * *fix the undefined variable*: some framework versions log `error` inside a
   `catch(e)` block, so stopping a sound throws `ReferenceError` — an unhandled
   error at exactly the wrong moment.
@@ -169,6 +175,44 @@ exactly the shape of that check. Confirm the candidate, then write the patch:
 `expect` must equal the bytes at `offset` (or, with `mode: "search"`, exist
 somewhere) — otherwise the patch is skipped and reported. `expect` and `replace`
 must be the same length: a resize would move every offset in the module.
+
+Search mode now requires the pattern to be **unique** in the module: the
+bare `20 xx 0b` return tail occurs hundreds of times in a real game
+module, and patching every occurrence would force-true hundreds of
+unrelated boolean checks. Include enough of the function around the tail
+to make the match unique, and let the tail be the only bytes that change.
+
+**The initial heap** — the other patch that matters on a tablet. Unity
+publishes WebGL builds whose memory section declares a large initial heap
+(the pinned community build declares 32768 pages = 2048 MiB), and the
+browser backs all of it at instantiation, before the first scene loads.
+That initial size is a single LEB128 field: `--scan` prints the module's
+memory limits, and `wasm-initial-heap` in `tools/patches.mjs`
+(`patchInitialMemory` in `tools/wasm-module.mjs`) rewrites that field to
+a smaller size — same byte width, declared maximum untouched — so the
+heap starts small and grows only as the game allocates. Static data and
+the stack live in the first few MiB, so 1024–1536 MiB rungs are safe
+floors for a 2 GiB module; the tooling refuses anything that would not
+fit the existing field or exceed the declared maximum.
+
+**The pinned community build** is patched at runtime instead: `play.html`
+rewrites the initial-heap field and the `unload-assets-always` candidate
+while the module stream-compiles (`js/unity-startup.js`), and
+`patches/community-bcbe014.json` pins the same two patches as data. That
+file is marked `"communityOnly": true`, so `prepare-build.mjs` never
+auto-applies it to a prepared build. To host a patched mirror instead of
+patching in the browser:
+
+```bash
+node web/tools/patch-community-wasm.mjs --wasm w-pt.wasm.unityweb \
+  --framework w-pt.framework.js.unityweb --out mirror   # --heap 1536 default
+# then: play.html?communityBase=https://<your-host>/mirror/
+```
+
+It verifies the pinned contexts before writing anything, changes exactly
+four bytes in the wasm (two in the heap LEB, two in the unload tail),
+keeps both files gzipped `.unityweb` (the stock loader requires it), and
+the runtime patcher recognises the result and leaves it alone.
 
 The archive viewer (`tools/unity-webdata.mjs`) has an `--list-videos` mode, the
 wasm tools have `--scan`, and both print what they found before changing

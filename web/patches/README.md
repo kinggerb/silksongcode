@@ -4,7 +4,15 @@
 *after verifying the original bytes*. A patch that does not match the build in
 front of it is skipped and reported — it can never quietly corrupt a module.
 
-Nothing ships here by default, because the offsets depend on the exact game and
+One file ships here: `community-bcbe014.json`, pinned to the externally
+hosted community build (see [../COMMUNITY-BUILD.md](../COMMUNITY-BUILD.md)).
+It carries `"communityOnly": true`, so `prepare-build.mjs` never
+auto-applies it to a prepared build — it is applied at runtime by
+`play.html` (`js/unity-startup.js`) and, for self-hosted mirrors, by
+`tools/patch-community-wasm.mjs`. It has two entries: the structural
+initial-heap rewrite (`wasm-initial-heap`, describing the memory section
+rather than bytes to search for) and the `unload-assets-always` candidate
+below. For your own build the offsets still depend on the exact game and
 Unity build. To add one:
 
 ```bash
@@ -39,7 +47,7 @@ Fields:
 | `name` | shown in the report and in `build-manifest.json` |
 | `why` | free text, also recorded |
 | `offset` | byte offset in the wasm module |
-| `mode` | `"search"` finds `expect` anywhere instead of at `offset` (use right after a game update, when everything moved) |
+| `mode` | `"search"` finds `expect` anywhere instead of at `offset` (use right after a game update, when everything moved) — the match must be **unique** in the module, or the patch is refused |
 | `expect` | the bytes that must be there (hex, spaces optional) |
 | `replace` | the bytes to write — **same length** as `expect` |
 

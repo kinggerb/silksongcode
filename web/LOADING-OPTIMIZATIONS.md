@@ -309,6 +309,70 @@ against the digest-verified pinned loader. `tools/test-browser.mjs` now
 expects `shell=1.1.2 WebGL2`. Gameplay on the affected iPad is not claimed
 until a device report shows non-zero FPS and a visible title screen.
 
+## Follow-up (shell 1.2.0): the heap is patchable after all, streamed bundles, first frame
+
+The device report that followed shell 1.1.2 pinned the failure down: every
+ZIP part verified, then `engine ready`, then a black screen and a jetsam
+kill seconds later. Three facts, two of them corrections to what the
+sections above say:
+
+- **The compiled-in 2 GiB initial heap is patchable from the page.** The
+  pinned module's memory section (`05 08 01 01 80 80 02 80 fe 03` at
+  offset 207742) declares its initial size as a three-byte LEB128. The
+  page already owned the wasm byte stream between gunzip and
+  `WebAssembly.compileStreaming`; shell 1.2.0 puts a context-verifying
+  `TransformStream` there that rewrites exactly that field (default
+  1536 MiB; `?wasmHeap=1280` or `1024`; the declared maximum is never
+  touched, so the heap still grows on demand). This is a section-field
+  rewrite, not an allocator patch, and it fails open: any byte mismatch
+  is logged and the module compiles unpatched. The same pass applies the
+  `unload-assets-always` candidate (the unique 11-byte context around
+  function #106897's return tail; still a structurally-identified
+  candidate, `?unloadPatch=0` opts out) and the SHA-verified framework
+  now also gets the Unity 6 `disconnectSource` audio-release patch that
+  the offline pipeline had all along. `heapPatch=0`, `frameworkPatch=0`
+  and `wasmPatch=0` A/B the rest. The offline mirror route lives in
+  `tools/patch-community-wasm.mjs` + `patches/community-bcbe014.json`;
+  run against the pinned binaries it changes exactly four bytes.
+- **Bundles no longer pass through an in-RAM Blob.** ZIP-backed
+  Addressables used to inflate into a `BlobWriter` — the whole bundle in
+  the JS heap — before Unity copied it into the wasm heap. They are now
+  delivered as a back-pressured `ReadableStream` (`archive.streamFor`):
+  the inflater only runs as fast as the consumer reads, ranges
+  decompress-and-discard the prefix, and CRC/count checks still run.
+  Cached and OPFS-extracted Files were already disk-backed and are
+  unchanged; `?bundleStream=0` restores the Blob path. The legacy
+  whole-ZIP recovery mount deliberately keeps the Blob path so a bad
+  archive is still caught before delivery.
+- **Engine-ready is no longer treated as booted.** The old page hid the
+  loading overlay and cleared the crash stage the moment
+  `createUnityInstance` resolved; the black screen that followed was
+  the first scene still loading, and a kill there was misreported as a
+  mid-game death. The overlay now stays up ("Engine ready — loading
+  the first scene…") until frames actually advance (three of them, or
+  a logged 60 s timeout), and the persisted stage is `first scene
+  (engine ready, no frame yet)`. Safe mode also drops to the lowest
+  heap rung (`wasmHeap=1024`).
+
+Validation: **226 tests across eleven suites** (`cd web && npm test`),
+including a new `test-wasm-patch.mjs` (structural memory-section parsing
+and the ladder, unique-search rule, the offline tool + CLI against
+synthetic modules carrying the pinned contexts, a 1-byte-chunk torture
+of the patch stream, `compileStreaming` through it, and the patched
+Unity 6 `disconnectSource` actually executed), streamed-bundle tests
+(byte-exact GETs, ranges, backpressure with a stalled reader,
+mid-stream cancel, failure before vs. after the first byte), and page
+tests for the patch settings, the diagnostics line and the first-frame
+overlay. Outside the suites, the offline tool and the runtime patch
+stream were run against the real pinned `w-pt.wasm.unityweb`: exactly
+four bytes change, the result validates, and `compileStreaming` accepts
+it with both patches reported applied. The Chromium integration needs a
+re-run with a browser binary available (it now waits for the overlay to
+clear, i.e. for real frames, not just engine-ready). Gameplay on the
+iPad still needs the device check: boot log `shell=1.2.0 WebGL2`,
+`wasm patch wasm-initial-heap: applied`, `game memory: 1536 MB of wasm
+heap` (or the chosen rung), `first frame drawn`, non-zero FPS.
+
 ## Still requires external assets/project/device work
 
 The original Unity project and a paid/large-file hosting account are not in
@@ -318,7 +382,9 @@ this repository. Consequently this change does **not** claim to:
 - rebuild atlases into genuine shared dependencies;
 - resize/repack sprite atlases without damaging sprite coordinates;
 - re-encode/rebank audio or change language dependencies;
-- change compiled heap limits, managed stripping, shaders or scene startup code;
+- change managed stripping, shaders or scene startup code (the compiled
+  *initial* heap size is handled at runtime by shell 1.2.0 above; the
+  declared maximum is deliberately left alone);
 - prove every boss/scene/save works or that an iPad reaches gameplay in 180 s.
 
 These are not safe HTML switches. Existing destructive slimming is not

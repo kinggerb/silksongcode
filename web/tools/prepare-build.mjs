@@ -38,7 +38,7 @@ import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
 import { openArchive, rebuildArchive, makePlaceholderVideo, videoKind, looksLikeVideo, human, MAGIC } from './unity-webdata.mjs';
-import { validate as validateWasm, applyPatch, scanBooleanReturns } from './wasm-module.mjs';
+import { validate as validateWasm, applyPatch, scanBooleanReturns, parseMemoryLimits } from './wasm-module.mjs';
 import { PATCHES, patchFramework, WASM_PATCH_LIBRARY } from './patches.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -347,6 +347,13 @@ async function main() {
     const buf = await fsp.readFile(wasmFile);
     const summary = validateWasm(buf);
     log('module: ' + (summary.ok ? summary.summary.functionCount + ' functions, ' + human(buf.length) : 'INVALID — ' + summary.detail));
+    for (const mem of parseMemoryLimits(buf)) {
+      log(
+        'memory: initial ' + mem.initialPages + ' pages (' + ((mem.initialPages * 65536) / 1048576) + ' MiB) at offset ' + mem.initialOffset +
+        (mem.maximumPages === null ? ', no declared maximum' : ', maximum ' + mem.maximumPages + ' pages (' + ((mem.maximumPages * 65536) / 1048576) + ' MiB)') +
+        ' — the initial amount is backed at instantiation, before any asset loads'
+      );
+    }
     const candidates = scanBooleanReturns(buf);
     log('candidates that look like "is X required?" checks (confirm before patching):');
     candidates.slice(0, 20).forEach((c) => {
@@ -513,7 +520,19 @@ async function main() {
   if (!patchFiles.length) log('  (no patches configured — see web/BUILD.md §4)');
   for (const patchFile of patchFiles) {
     const patches = JSON.parse(await fsp.readFile(patchFile, 'utf8'));
+    // A patch file pinned to a specific externally-hosted binary (the
+    // community build) must never be auto-applied to a prepared build that
+    // merely happens to be lying next to it. An explicit --patch still can.
+    if (patches.communityOnly && !args.patch) {
+      log('  · ' + path.basename(patchFile) + ' is pinned to a specific binary (communityOnly) — skipped for a prepared build');
+      continue;
+    }
     for (const patch of patches.patches || []) {
+      if (!patch.expect || !patch.replace) {
+        report.patches.push({ name: patch.name || '(unnamed)', file: path.basename(patchFile), applied: false, reason: 'structural patch — not a byte patch prepare-build can apply' });
+        log('  · ' + (patch.name || '(unnamed)') + ' is structural, not a byte patch — skipped');
+        continue;
+      }
       try {
         const result = applyPatch(wasmBytes, patch);
         report.patches.push({ name: patch.name, file: path.basename(patchFile), ...result });

@@ -273,12 +273,12 @@
   <div id="logbox"></div>
 </div>
 
-<script src="js/stream.js?v=1.1.2"></script>
+<script src="js/stream.js?v=1.2.0"></script>
 <script src="js/manifest.js"></script>
 <script src="js/zip-plan.js"></script>
-<script src="js/asset-cache.js?v=1.1.2"></script>
-<script src="js/community-build.js?v=1.1.2"></script>
-<script src="js/unity-startup.js?v=1.1.2"></script>
+<script src="js/asset-cache.js?v=1.2.0"></script>
+<script src="js/community-build.js?v=1.2.0"></script>
+<script src="js/unity-startup.js?v=1.2.0"></script>
 <script src="js/zip.min.js"></script>
 <script src="js/save-codec.js"></script>
 <script src="js/boss-scenes.js"></script>
@@ -300,12 +300,12 @@
 
   /* ---------------------------------------------------------------- *
    * Shell version — bumped when the page itself changes, so the log on
-   * the device says which shell is running (`shell=1.1.2 WebGL2`). The
+   * the device says which shell is running (`shell=1.2.0 WebGL2`). The
    * `?v=` query on the four versioned script tags and on writer.js follows
    * this number; game-data cache keys are deliberately independent of it,
    * so upgrading the shell never invalidates downloaded assets or saves.
    * ---------------------------------------------------------------- */
-  var SHELL_VERSION = '1.1.2';
+  var SHELL_VERSION = '1.2.0';
   // The only renderer this build is allowed to use. The pinned loader's
   // WebGPU adapter probe is removed (js/unity-startup.js), a preRun guard
   // clears the flag for any loader that could not be patched, and the
@@ -329,6 +329,47 @@
   var COMMUNITY_BUILD = null;
   var COMMUNITY_ZIP_MOUNT = null;
   var totalBytes = 0; // manifest datasets or the community Addressables archive
+
+  /* ---------------------------------------------------------------- *
+   * Community-build runtime patches (js/unity-startup.js does the work;
+   * these helpers only decide what this page asks for)
+   *
+   * The pinned binary declares a 2048 MiB initial wasm heap, which the
+   * browser backs in full the moment the module is instantiated. The
+   * declared initial value is lowered in flight — default 1536 MiB,
+   * `?wasmHeap=<MiB>` to pick another rung (1280, 1024), safe mode
+   * asks for 1024 — while the 4080 MiB maximum stays untouched and
+   * heap growth serves real demand. `?wasmPatch=0` turns the wasm
+   * patches off entirely, `?heapPatch=0` / `?unloadPatch=0` turn off
+   * one each, `?frameworkPatch=0` the audio patch, and
+   * `?bundleStream=0` returns bundle delivery to the old in-RAM Blob
+   * path (streamed delivery is what keeps the first scene's bundles
+   * out of the JS heap while Unity copies them into the wasm heap).
+   * ---------------------------------------------------------------- */
+  function wasmHeapMiB() {
+    var value = Number(params.get('wasmHeap'));
+    return isFinite(value) && value >= 256 && value <= 4080 ? Math.round(value) : 1536;
+  }
+  function bundleStreaming() {
+    return params.get('bundleStream') !== '0';
+  }
+  function communityPatchOptions() {
+    return {
+      heapMiB: wasmHeapMiB(),
+      heapPatch: params.get('heapPatch') !== '0',
+      unloadPatch: params.get('unloadPatch') !== '0',
+      wasmPatches: params.get('wasmPatch') !== '0',
+      frameworkPatch: params.get('frameworkPatch') !== '0',
+    };
+  }
+  function communityPatchSummary() {
+    var patch = communityPatchOptions();
+    if (!patch.wasmPatches) return 'wasm patches off (?wasmPatch=0)';
+    return 'initial wasm heap ' + (patch.heapPatch ? patch.heapMiB + ' MiB (published 2048, max 4080 untouched)' : 'as published (2048 MiB)') +
+      ', unload-assets gate ' + (patch.unloadPatch ? 'on' : 'off') +
+      ', framework audio patch ' + (patch.frameworkPatch ? 'on' : 'off') +
+      ', bundle delivery ' + (bundleStreaming() ? 'streamed' : 'in-RAM Blob (?bundleStream=0)');
+  }
 
   /* ---------------------------------------------------------------- *
    * Small helpers
@@ -1414,6 +1455,35 @@
     } catch (e) {}
     return null;
   }
+  /**
+   * Say once, out loud, which in-page memory levers this binary actually
+   * answers. The prepared-build levers (`_gc_collect`,
+   * `_QualitySettings_SetTextureSize`, …) are name-mangled away in the
+   * pinned community module — absent exports, verified against its
+   * export table — so on that build cleanupMemory/applyTextureQuality
+   * are guarded no-ops, and the levers carrying the memory work are
+   * the wasm patches (initial heap + unload gate), the render scale
+   * and streamed bundle delivery. A log line is cheaper than another
+   * round of guessing from a crash report.
+   */
+  var memoryLeversLogged = false;
+  function logMemoryLevers() {
+    if (memoryLeversLogged) return;
+    memoryLeversLogged = true;
+    try {
+      var m = unityModule();
+      var asm = (m && m.asm) || {};
+      var has = function (name) { return typeof asm[name] === 'function' || typeof (m && m[name]) === 'function'; };
+      var levers = [
+        'gc=' + (has('_gc_collect') ? 'yes' : 'no-export'),
+        'texture-size=' + (has('_QualitySettings_SetTextureSize') ? 'yes' : 'no-export'),
+        'texture-limit=' + (has('_QualitySettings_SetMasterTextureLimit') ? 'yes' : 'no-export'),
+        'unload=' + (has('_ResourceManager_UnloadUnusedAssets') ? 'yes' : 'no-export'),
+      ].join(', ');
+      log('page memory levers on this binary: ' + levers +
+        ' (no-export is expected on the pinned community build — the wasm heap/unload patches and the render scale carry it there)');
+    } catch (e) {}
+  }
   /* ---------------------------------------------------------------- *
    * Memory limits learned from the last crash
    * --------------------------------------------------------------------
@@ -1608,6 +1678,12 @@
     url.searchParams.set('auto', '1');
     url.searchParams.set('downloads', '2');
     url.searchParams.set('bundleCacheMB', '64');
+    // The lowest rung of the heap ladder: if a 1536 MiB initial heap
+    // plus the first scene still crosses this iPad's ceiling, declaring
+    // 1024 MiB (and growing only as the game actually allocates) is the
+    // smallest floor this shell will start from.
+    url.searchParams.set('wasmHeap', '1024');
+    url.searchParams.set('bundleStream', '1');
     return url.href;
   }
   function diagnosticsText() {
@@ -1627,6 +1703,7 @@
     return [
       'shell=' + SHELL_VERSION + ' ' + SHELL_RENDERER,
       'userAgent: ' + (navigator.userAgent || ''),
+      'runtime patches (this load): ' + communityPatchSummary(),
       'last-session: ' + summary,
       'stage: ' + stage,
       '--- previous log ---',
@@ -1795,6 +1872,9 @@
         preset: perf.preset, activeIndex: activePresetIndex(), presetId: PRESETS[activePresetIndex()].id,
         scale: perf.scale, fps: perf.fps, auto: perf.auto, crashSteps: perf.crashSteps,
         frameInterval: frameInterval, lastFps: lastFps, frames: frameCount,
+        waitingForFirstFrame: waitingForFirstFrame,
+        wasmHeapMiB: wasmHeapMiB(), bundleStreaming: bundleStreaming(),
+        patchOptions: communityPatchOptions(),
       };
     },
     presets: function () { return PRESETS.map(function (p) { return p.id; }); },
@@ -1828,6 +1908,9 @@
         frameInterval: function () { return frameInterval; },
         downloadConcurrency: downloadConcurrency,
         safeStartUrl: safeStartUrl,
+        communityPatchOptions: communityPatchOptions,
+        communityPatchSummary: communityPatchSummary,
+        waitingForFirstFrame: function () { return waitingForFirstFrame; },
         surfaceEngineFailure: surfaceEngineFailure,
         noteEngineFrame: noteEngineFrame,
         verifyPayloadMagics: verifyPayloadMagics,
@@ -2683,6 +2766,36 @@
    * The load itself
    * ---------------------------------------------------------------- */
   var booted = false, bootedAt = 0, currentStage = 'idle', unityInstance = null;
+  // Between "engine ready" and the first drawn frames there is a whole
+  // first scene to load — and, on the iPad this port keeps dying on,
+  // that window is where the tab is jetsam-killed. The overlay stays up
+  // for it (completeUnityBoot/finishBootOverlay), so what the player
+  // sees is a loading screen with a status line, never a bare black
+  // canvas, and the flight recorder's stage says exactly which side
+  // of the first frame a kill landed on.
+  var waitingForFirstFrame = false, firstFrameTimer = 0, bootFrameCount = 0;
+  var FIRST_FRAME_TIMEOUT_MS = 60000;
+
+  function finishBootOverlay(reason) {
+    if (!waitingForFirstFrame) return;
+    waitingForFirstFrame = false;
+    if (firstFrameTimer) { clearInterval(firstFrameTimer); firstFrameTimer = 0; }
+    var waited = bootedAt ? Math.round(nowMs() - bootedAt) : 0;
+    if (reason === 'timeout') {
+      logError('no frame drawn ' + Math.round(waited / 1000) + 's after the engine reported ready — showing the canvas anyway; if it stays black, Copy diagnostics from the start screen after a reload');
+      timing('loading overlay hidden (first-frame timeout)');
+    } else {
+      log('first frame drawn ' + waited + ' ms after engine ready (' + (frameCount - bootFrameCount) + ' frames in)');
+      timing('first frame drawn');
+    }
+    currentStage = 'running';
+    clearStage();
+    releaseAwake();
+    screenEl.classList.add('hidden');
+    fpsEl.classList.remove('hidden');
+    toast('Tap the screen once so sound can start', 5000);
+    canvas.focus && canvas.focus();
+  }
 
   /* ---------------------------------------------------------------- *
    * Payload magic check
@@ -2872,13 +2985,16 @@
       productName: 'Hollow Knight Silksong',
       productVersion: '1.0',
       // The pinned community binary ships a ~2 GiB wasm heap of its own and
-      // *ignores both of the settings below* — the reported "2048 MB of
-      // wasm heap" is real, and no HTML setting can turn it into a 1 GiB
-      // heap. They are kept for a self-built standard build, which does
-      // honour them; patching the heap size into the wasm module is not
-      // attempted, because a wrongly patched allocator corrupts the heap.
-      // The working levers are the render scale (a smaller canvas buffer)
-      // and the managed-heap collection cadence below.
+      // *ignores both of the settings below* (its framework never reads
+      // them — verified against the published framework). They are kept
+      // for a self-built standard build, which does honour them. For the
+      // pinned build the heap the browser backs at instantiation is
+      // set instead by js/unity-startup.js, which rewrites the wasm
+      // memory section's *initial* limit in flight (a declarative
+      // header, same byte width, maximum untouched — not allocator
+      // code) while the module stream-compiles: see wasmHeapMiB().
+      // Verify in the boot log: a line `wasm patch wasm-initial-heap:
+      // applied` and `game memory:` near the requested heap, not 2048.
       maximumHeapSize: 1073741824,
       // See above: documentation for builds that honour it; the pinned
       // binary starts at its own compiled-in size either way.
@@ -2961,25 +3077,38 @@
 
   function completeUnityBoot(instance, dataSet, wasmSet) {
     booted = true;
-    timing('loading overlay hidden');
-    log('startup summary: ' + JSON.stringify(loadTimings));
+    log('startup summary so far: ' + JSON.stringify(loadTimings));
     bootedAt = nowMs();
-    currentStage = 'running';
-    clearStage();
-    releaseAwake();
+    bootFrameCount = frameCount;
+    // Engine-ready is the *bootstrap* scene initialised — the game's
+    // first real scene (its menu) is Addressables content that loads
+    // after this resolves, so hiding the overlay here used to present
+    // a black canvas for the whole bundle/texture window, and a kill
+    // in that window was recorded as "running". The stage therefore
+    // stays at first-scene load (and the overlay up) until frames are
+    // demonstrably flowing; finishBootOverlay does the hiding.
+    currentStage = 'first scene (engine ready, no frame yet)';
+    markStage(currentStage);
     bgWarn.classList.add('hidden');
-    screenEl.classList.add('hidden');
-    fpsEl.classList.remove('hidden');
     applyPerf('at boot');
     applyPad();
     startFps();
     startHeartbeat();
     lastFrameSeenAt = nowMs();
-    log('game booted — ' + perfDescription() + ', canvas ' + canvas.width + '×' + canvas.height);
+    log('game booted — engine ready, first scene loading — ' + perfDescription() + ', canvas ' + canvas.width + '×' + canvas.height);
     var heap = heapMB();
     if (heap) log('game memory: ' + heap + ' MB of wasm heap');
-    toast('Tap the screen once so sound can start', 5000);
-    canvas.focus && canvas.focus();
+    logMemoryLevers();
+    setStatus('Engine ready — loading the first scene…');
+    setProgress(null, '');
+    waitingForFirstFrame = true;
+    firstFrameTimer = setInterval(function () {
+      // Three released frames is an engine that is actually looping,
+      // not a promise that resolved: that is the earliest honest
+      // moment to call this screen the game.
+      if (frameCount - bootFrameCount >= 3) finishBootOverlay('frames');
+      else if (nowMs() - bootedAt >= FIRST_FRAME_TIMEOUT_MS) finishBootOverlay('timeout');
+    }, 200);
     // The pinned framework's Browser.updateCanvasDimensions strips the canvas
     // element's inline width/height during takeover. Put the display size back
     // after that. These timers call setCanvasCss only — never canvas.width or
@@ -3126,10 +3255,12 @@
     var source = COMMUNITY_BUILD;
     if (!source) throw new Error('the community build source was not selected');
     var startupController = new AbortController();
-    var startup = typeof SKUnityStartup !== 'undefined' ? SKUnityStartup.prepare(source, {
+    var patchOptions = communityPatchOptions();
+    log('runtime patches requested: ' + communityPatchSummary());
+    var startup = typeof SKUnityStartup !== 'undefined' ? SKUnityStartup.prepare(source, Object.assign({}, patchOptions, {
       base: ASSET_BASE, fetchImpl: window.fetch.bind(window), document: document,
       streaming: params.get('streaming') !== '0', onLog: log, signal: startupController.signal,
-    }) : Promise.resolve(null);
+    })) : Promise.resolve(null);
     // Attach a handler immediately; indexing may fail before this is awaited.
     startup.catch(function (error) { log('Unity preload failed: ' + error.message); });
     try {
@@ -3245,10 +3376,24 @@
       }
 
       setStatus('Indexing the cached game assets…');
-      if (archiveMode === 'eager') COMMUNITY_ZIP_MOUNT = await SKCommunityBuild.openArchive(archiveSet.file, window.zip, { onLog: log });
+      if (archiveMode === 'eager') COMMUNITY_ZIP_MOUNT = await SKCommunityBuild.openArchive(archiveSet.file, window.zip, {
+        onLog: log,
+        // While the first scene streams in, the loading screen is still
+        // up on purpose (see completeUnityBoot) — let it say which
+        // bundle it is waiting on instead of sitting on one sentence.
+        onStatus: function (message) { if (!booted || waitingForFirstFrame) setStatus(message); },
+      });
       log('indexed ' + COMMUNITY_ZIP_MOUNT.entryCount + ' files in the community asset ZIP');
       SKCommunityBuild.installFetchMount(window, COMMUNITY_ZIP_MOUNT, {
-        onAsset: function (name) { log('asset from local ZIP: ' + name); },
+        // Streamed bundle delivery keeps each bundle out of the JS heap
+        // while Unity copies it into its own — the duplication that
+        // helped push this boot over the iPad's ceiling. Opt out with
+        // ?bundleStream=0 only to A/B the old Blob path.
+        streamBundles: bundleStreaming(),
+        onAsset: function (name) {
+          log('asset from local ZIP: ' + name);
+          if (waitingForFirstFrame) setStatus('Loading the first scene…');
+        },
         onAssetError: function (name, error) {
           var detail = (error && error.message) || String(error || 'unknown ZIP read error');
           var message = 'Could not load game bundle ' + name + ': ' + detail;
@@ -3540,6 +3685,26 @@
         });
       }
       log('asset base: ' + (ASSET_BASE || '(this page)'));
+    });
+  })();
+})();
+</script>
+</body>
+</html>
+bute('aria-describedby');
+        startBtn.addEventListener('click', function onStart() {
+          startBtn.removeEventListener('click', onStart);
+          start();
+        });
+      }
+      log('asset base: ' + (ASSET_BASE || '(this page)'));
+    });
+  })();
+})();
+</script>
+</body>
+</html>
++ (ASSET_BASE || '(this page)'));
     });
   })();
 })();

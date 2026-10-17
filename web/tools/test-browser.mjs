@@ -162,7 +162,11 @@ try {
     await target.waitForFunction(() => !document.getElementById('startBtn').disabled);
     const start = Date.now(); await target.click('#startBtn');
     try {
-      await target.waitForFunction(() => window.unityInstance || !document.getElementById('err').classList.contains('hidden'), null, { timeout: 20000 });
+      /* Shell 1.2.0: engine-ready is no longer the end of the boot — the
+       * overlay stays up until frames are actually being drawn (the real
+       * game's first scene). The fixture draws by chaining rAFs, so wait
+       * for the overlay to go away, not just for the instance. */
+      await target.waitForFunction(() => (window.unityInstance && document.getElementById('screen').classList.contains('hidden')) || !document.getElementById('err').classList.contains('hidden'), null, { timeout: 20000 });
     } catch (error) { throw new Error(error.message + '\nERRORS: ' + errors.join(' | ') + '\n' + logs.slice(-35).join('\n')); }
     const result = await target.evaluate(() => ({ ready: !!window.unityInstance, fixture: window.__fixture,
       gpuAdapterRequests: window.__gpuAdapterRequests, gpuInitError: window.__gpuInitError,
@@ -185,7 +189,7 @@ try {
   const boot = query => bootFor(page, query);
   const cold = await boot('?assets=lazy');
   assert.equal(cold.result.fixture.streaming, true, 'real pinned loader must use the custom native compiler');
-  assert.ok(logs.some(line => line.includes('shell=1.1.2 WebGL2')), 'the boot log names the shell and the renderer');
+  assert.ok(logs.some(line => line.includes('shell=1.2.0 WebGL2')), 'the boot log names the shell and the renderer');
   assert.ok(logs.some(line => line.includes('WebGL 2')), 'the verified WebGL 2 selection is logged');
   assert.ok(transferred < archive.length, 'cold lazy boot should not download the full ZIP');
   assert.ok(partRequests.length < parts.length, 'cold boot should leave unrequested ZIP parts on the host');

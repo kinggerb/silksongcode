@@ -1,0 +1,31 @@
+{
+  "for": "web-ports/hollow-knight-silksong @ bcbe014765f2f6ca4b1d82ac25755a0299a600ab · Build/w-pt.wasm.unityweb (20,192,325 B gzip, 82,574,276 B inflated)",
+  "communityOnly": true,
+  "notes": [
+    "Consumed by tools/patch-community-wasm.mjs (the offline mirror builder) and mirrored at runtime by js/unity-startup.js — the test suite checks the two agree.",
+    "The wasm-initial-heap entry is deliberately NOT a bare offset patch here: the \"structural\" marker tells consumers to go through parseMemoryLimits()/patchInitialMemory(), which verifies the memory section itself. prepare-build.mjs skips entries it cannot express as offset/search byte patches (entries without expect/replace), so a prepared build can never pick up the community heap value by accident.",
+    "unload-assets-always: --scan candidate func #106897 (3,136 B body, f64 constants 268435456 (256 MiB) and 4294967296 (4 GiB), 10 float compares, tail `local.get 9; end` at 52,123,560). The 11-byte pattern is unique in the pinned module (verified 2026-10-17); the bare 3-byte tail occurs 309 times and must never be patched alone. It is the strongest structural match for the IsUnloadAssetsRequired-style gate, not a proof — confirm on a device by watching the heap stay flat across room transitions, and disable with ?unloadPatch=0 (page) or --no-unload-patch (tool) if behaviour differs."
+  ],
+  "memory": {
+    "name": "wasm-initial-heap",
+    "structural": true,
+    "why": "the pinned binary declares initial=32768 pages (2048 MiB) of wasm memory, backed in full at instantiation — on an iPad that alone is most of the tab's jetsam budget before any asset loads. Declaring 24576 pages (1536 MiB) instead and letting wasmMemory.grow serve real demand (declared maximum 65280 pages / 4080 MiB untouched, framework getHeapMax() agrees) turns a silent jetsam kill into either a working boot or a visible abort(\"OOM\").",
+    "sectionOffset": 207742,
+    "sectionBytes": "05 08 01 01 80 80 02 80 fe 03",
+    "initialOffset": 207746,
+    "expectedInitialPages": 32768,
+    "expectedMaximumPages": 65280,
+    "initialPages": 24576,
+    "ladderMiB": [1536, 1280, 1024]
+  },
+  "patches": [
+    {
+      "name": "unload-assets-always",
+      "mode": "search",
+      "why": "force the IsUnloadAssetsRequired-style gate (func #106897) to return true so room transitions run Resources.UnloadUnusedAssets()",
+      "offset": 52123552,
+      "expect": "20 0c 41 b0 04 6a 24 00 20 09 0b",
+      "replace": "20 0c 41 b0 04 6a 24 00 41 01 0b"
+    }
+  ]
+}

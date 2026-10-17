@@ -238,6 +238,8 @@ Likewise, the survey's multi-GiB fully decompressed totals describe the whole or
 
 `makeUnityConfig` supplies `INITIAL_MEMORY` and `maximumHeapSize`, but the inspected pinned generated framework does not read these fields; it exports its Wasm memory and has a hard-coded heap-growth maximum. Do not assume page-level numbers reconfigure that binary. Verify the compiled memory limits/growth behavior before tuning, and distinguish any separate page watchdog from an actual engine allocation limit. Increasing the heap on an iPad can make stability worse.
 
+> Update (shell 1.2.0): the compiled memory limits have now been verified on the pinned module — memory section at offset 207742, initial 32768 pages (2048 MiB), maximum 65280 pages (4080 MiB) — and the *initial* size is rewritten at runtime while the module stream-compiles (`js/unity-startup.js`, default 1536 MiB, ladder 1280/1024, maximum untouched). The config fields above remain dead for this binary; the patch is the mechanism. See LOADING-OPTIMIZATIONS.md, "Follow-up (shell 1.2.0)".
+
 ## 4. How to measure and choose
 
 ### Establish separate test cases

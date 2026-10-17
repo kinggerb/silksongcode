@@ -59,10 +59,55 @@ const PATCHED_MEDIA_BLOCK =
   'try{this.source.mediaElement.removeAttribute("src")}catch(e){}' +
   'this.source.mediaElement.src="";try{this.source.mediaElement.load()}catch(e){}}';
 
+// The same block in the *unminified* Unity 6 framework the pinned
+// community build ships (verified byte-for-byte against
+// `w-pt.framework.js.unityweb` @ bcbe014, 631,696 B inflated). Two things
+// differ from the older shape, and the patch has to respect both: there is
+// no `playTimeout` bookkeeping here (`_pauseMediaElement` only sets a
+// flag while a play() is pending), and `WEBAudio.pendingAudioSources` is
+// declared but never used. A media element handed to
+// `createMediaElementSource` can never be reused for another source node,
+// so on this terminal disconnect path dropping its `src` cannot break a
+// later replay of the channel — it only frees the decoder. The release is
+// deferred until a pending play() settles, because clearing `src`
+// mid-play() would reject that promise and the framework's own catch
+// rethrows anything that is not NotAllowedError.
+// Keep this text identical to `patchFramework()` in js/unity-startup.js,
+// which applies the same patch to the fetched framework at runtime; the
+// test suite compares the two outputs.
+const ORIGINAL_MEDIA_BLOCK_U6 =
+  'if (this.source.mediaElement) {\n' +
+  '\t\t\t\t\t\tthis.source._pauseMediaElement()\n' +
+  '\t\t\t\t\t}\n' +
+  '\t\t\t\t\tthis.source.onended = null;';
+
+const PATCHED_MEDIA_BLOCK_U6 =
+  'if (this.source.mediaElement) {\n' +
+  '\t\t\t\t\t\tthis.source._pauseMediaElement();\n' +
+  '\t\t\t\t\t\ttry {\n' +
+  '\t\t\t\t\t\t\tvar skEl = this.source.mediaElement;\n' +
+  '\t\t\t\t\t\t\tif (this.source.playTimeout) { clearTimeout(this.source.playTimeout); this.source.playTimeout = null; }\n' +
+  '\t\t\t\t\t\t\tvar skRelease = function () { try { skEl.pause(); } catch (e) {} try { skEl.removeAttribute("src"); } catch (e) {} try { skEl.src = ""; } catch (e) {} try { skEl.load(); } catch (e) {} };\n' +
+  '\t\t\t\t\t\t\tif (this.source.playPromise && typeof this.source.playPromise.then === "function") this.source.playPromise.then(skRelease, skRelease); else skRelease();\n' +
+  '\t\t\t\t\t\t} catch (e) {}\n' +
+  '\t\t\t\t\t}\n' +
+  '\t\t\t\t\tthis.source.onended = null;';
+
 function replaceOnce(source, find, replace) {
   const at = source.indexOf(find);
   if (at < 0) return null;
   return source.slice(0, at) + replace + source.slice(at + find.length);
+}
+
+/** Count occurrences; a patch block that occurs twice is not an address. */
+function countOccurrences(source, find) {
+  let count = 0;
+  let at = source.indexOf(find);
+  while (at >= 0) {
+    count++;
+    at = source.indexOf(find, at + 1);
+  }
+  return count;
 }
 
 export function releaseAudioSourcePatch() {
@@ -71,17 +116,28 @@ export function releaseAudioSourcePatch() {
     why: 'lets WebKit free a room\'s music decoder instead of holding every room ever visited',
     apply(buffer) {
       const text = buffer.toString('latin1');
-      if (text.includes(PATCHED_MEDIA_BLOCK)) {
+      if (text.includes(PATCHED_MEDIA_BLOCK) || text.includes(PATCHED_MEDIA_BLOCK_U6)) {
         return { applied: true, already: true, occurrences: 1, detail: 'already applied' };
       }
-      const patched = replaceOnce(text, ORIGINAL_MEDIA_BLOCK, PATCHED_MEDIA_BLOCK);
-      if (patched === null) {
-        return {
-          applied: false,
-          detail: 'the framework does not contain Unity\'s unpatched channel.disconnectSource block',
-        };
+      for (const [original, replacement, shape] of [
+        [ORIGINAL_MEDIA_BLOCK, PATCHED_MEDIA_BLOCK, 'classic'],
+        [ORIGINAL_MEDIA_BLOCK_U6, PATCHED_MEDIA_BLOCK_U6, 'Unity 6'],
+      ]) {
+        const occurrences = countOccurrences(text, original);
+        if (occurrences > 1) {
+          return {
+            applied: false,
+            detail: 'the ' + shape + ' channel.disconnectSource block occurs ' + occurrences + ' times — refusing to guess which one',
+          };
+        }
+        if (occurrences === 1) {
+          return { applied: true, occurrences: 1, bytes: Buffer.from(replaceOnce(text, original, replacement), 'latin1'), detail: shape + ' framework shape' };
+        }
       }
-      return { applied: true, occurrences: 1, bytes: Buffer.from(patched, 'latin1'), detail: '' };
+      return {
+        applied: false,
+        detail: 'the framework does not contain Unity\'s unpatched channel.disconnectSource block',
+      };
     },
   };
 }
@@ -132,10 +188,16 @@ export function frameWorkPatches() {
 /** The documented shape of the memory patch, for BUILD.md and --scan output. */
 export const WASM_PATCH_LIBRARY = [
   {
+    name: 'wasm-initial-heap',
+    target: 'the memory section\'s `initial` limit',
+    why: 'a desktop-profile build can declare 2 GiB of initial memory, all of it backed at instantiation; declaring less and letting memory.grow serve real allocations keeps an iPad tab under the jetsam ceiling (the declared maximum is never touched)',
+    shape: 'structural, not a byte pattern: parseMemoryLimits() finds the field, patchInitialMemory() rewrites it as a same-width padded LEB128 after verifying the expected initial/maximum page counts',
+  },
+  {
     name: 'unload-assets-always',
     target: 'GameManager.IsUnloadAssetsRequired',
     why: 'returns true on every room change so Resources.UnloadUnusedAssets() runs (memory stays flat)',
-    shape: 'expect the tail of the function to be "20 xx 0b" (local.get N; end) and replace it with "41 01 0b" (i32.const 1; end)',
+    shape: 'expect the tail of the function to be "20 xx 0b" (local.get N; end) and replace it with "41 01 0b" (i32.const 1; end) — always with enough preceding context bytes that the pattern is unique in the module',
   },
   {
     name: 'gc-on-transition',
@@ -145,4 +207,9 @@ export const WASM_PATCH_LIBRARY = [
   },
 ];
 
-export const PATCHES = { frameWorkPatches, patchFramework, WASM_PATCH_LIBRARY };
+export const FRAMEWORK_MEDIA_BLOCKS = {
+  classic: { original: ORIGINAL_MEDIA_BLOCK, patched: PATCHED_MEDIA_BLOCK },
+  unity6: { original: ORIGINAL_MEDIA_BLOCK_U6, patched: PATCHED_MEDIA_BLOCK_U6 },
+};
+
+export const PATCHES = { frameWorkPatches, patchFramework, WASM_PATCH_LIBRARY, FRAMEWORK_MEDIA_BLOCKS };
