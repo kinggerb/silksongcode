@@ -12,6 +12,25 @@ const common = { caps: { opfs: true, workers: true }, cacheKey: 'game.zip', buil
   workerUrl: 'js/writer.js', allowMemoryFallback: false, verify: 'size', retryAttempts: 0 };
 
 section('production worker / durable resume regressions');
+await test('archive version migration removes only the obsolete ZIP and lazy-part cache', async () => {
+  const old = 'webgl-assets-bcbe014.zip';
+  const current = 'webgl-assets-bcbe014-art-preserved-20261017.zip';
+  const disk = browserStorage({
+    [old]: 'bad archive', [old + '.ok']: 'old completion', [old + '.building']: 'partial',
+    [old + '.probe']: 'probe', [old + '.part-1']: 'old part', [old + '.part-1.ok']: 'part marker',
+    [old + '.part-75.building']: 'partial part', [old + '.unrelated']: 'keep',
+    [current]: 'new archive', [current + '.ok']: 'new completion', 'save-index': 'keep saves',
+  });
+  try {
+    eq(await stream.removeDatasetPrefix(old), 7, 'removed the old archive, sidecars, and cached shards');
+    for (const suffix of ['', '.ok', '.building', '.probe', '.part-1', '.part-1.ok', '.part-75.building']) {
+      ok(!disk.files.has(old + suffix), 'stale cache removed: ' + old + suffix);
+    }
+    ok(disk.files.has(old + '.unrelated'), 'unrelated similarly named file was kept');
+    ok(disk.files.has(current) && disk.files.has(current + '.ok'), 'the new archive cache was untouched');
+    eq(disk.files.get('save-index').toString(), 'keep saves', 'save data was untouched');
+  } finally { disk.restore(); }
+});
 await test('a completed cache hit is read-only: no probes, truncation, or downloads', async () => {
   const disk = browserStorage({ 'game.zip': 'ABCD', 'game.zip.ok': 'test-build completed' });
   try {

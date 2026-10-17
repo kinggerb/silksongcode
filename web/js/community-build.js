@@ -1,10 +1,10 @@
 /* ============================================================================
  * community-build.js — stream and mount the permitted community WebGL build
  * ----------------------------------------------------------------------------
- * The pinned community archive stores its Addressables in one 1.17 GiB ZIP
- * split into 75 files (the upstream it was rebuilt from was 2.08 GB in 100).
- * Keep that archive on OPFS and read individual bundles from it with zip.js;
- * do not concatenate the pieces in RAM or unpack the whole archive.
+ * The pinned community archive stores its Addressables in a split ZIP whose
+ * exact size and part list come from community-build.json. Keep that archive
+ * on OPFS and read individual bundles from it with zip.js; do not concatenate
+ * the pieces in RAM or unpack the whole archive.
  * ==========================================================================*/
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) {
@@ -34,6 +34,11 @@
     var archive = config.assetArchive;
     if (!archive || !archive.cacheKey || !Array.isArray(archive.parts) || !archive.parts.length) {
       throw fail('community build configuration is missing the StreamingAssets archive parts');
+    }
+    if (archive.previousCacheKeys !== undefined && (!Array.isArray(archive.previousCacheKeys) ||
+        archive.previousCacheKeys.some(function (key) { return typeof key !== 'string' || !key || key === archive.cacheKey; }) ||
+        new Set(archive.previousCacheKeys).size !== archive.previousCacheKeys.length)) {
+      throw fail('invalid asset archive previous cache keys');
     }
     // The archive may live somewhere else than the rest of the build (the
     // slimmer re-published archive does), so it can name its own root.
@@ -81,29 +86,49 @@
     return base || (config.assetArchive && config.assetArchive.base) || config.base;
   }
 
+  // A new archive version may explicitly retire old complete-ZIP and lazy-part
+  // caches. Remove only those named keys; saves and unrelated OPFS datasets stay
+  // untouched. Failure is non-fatal: the new cache key still prevents reuse.
+  async function removeSupersededCaches(config, options, stream) {
+    var keys = config.assetArchive && config.assetArchive.previousCacheKeys;
+    if (!Array.isArray(keys) || !keys.length || !stream || typeof stream.removeDatasetPrefix !== 'function') return 0;
+    var removed = 0;
+    for (var i = 0; i < keys.length; i++) {
+      try {
+        var count = await stream.removeDatasetPrefix(keys[i]);
+        removed += Number(count) || 0;
+        if (count && options && options.onLog) options.onLog('discarded ' + count + ' stale archive cache file(s) for ' + keys[i]);
+      } catch (error) {
+        if (options && options.onLog) options.onLog('could not remove stale archive cache ' + keys[i] + ': ' + ((error && error.message) || error));
+      }
+    }
+    return removed;
+  }
+
   /* ---------------------------------------------------------------- *
    * Two hosts for the archive, and one of them says "later"
    *
    * The parts are published from this repository, and two hosts serve
    * them — but they do not serve them equally. jsDelivr refuses a
    * GitHub package larger than its limit (150 MB, and this one is
-   * ~1.19 GB) with `403 Package size exceeded the configured limit`,
+   * 1.72 GiB) with `403 Package size exceeded the configured limit`,
    * while raw.githubusercontent.com serves every committed blob under
-   * 100 MB and each part is 16 MiB.
+   * 100 MB and each part is 16 MiB. The current archive is 1.72 GiB in
+   * 111 parts, so jsDelivr's package limit still applies.
    *
    * The jsDelivr refusal is per request, not per package: a part it
    * has already cached keeps serving, so a download gets some way in
    * and then dies on the first part that was not — `HTTP 403 for
-   * …/parts/WebGL.zip.part6`, six parts into seventy-five. That is
-   * also why the descriptor names raw as `base` and keeps jsDelivr as
-   * the `mirror`: the host that always answers leads, and the CDN that
-   * is faster when it does answer is the fallback.
+   * …/parts/WebGL.zip.part6`. That is also why the descriptor names raw
+   * as `base` and keeps jsDelivr as the `mirror`: the host that always
+   * answers leads, and the CDN that is faster when it does answer is
+   * the fallback.
    *
    * GitHub raw answers the same way for a different reason. It rate
    * limits unauthenticated downloads — 60 requests an hour per IP
-   * since May 2025 — and a part is one request, so this archive, 75
-   * parts strong, can outrun the budget on its own. The answer is
-   * `403` (or `429`) in the middle of a perfectly good download:
+   * since May 2025 — and a part is one request, so this archive's 111
+   * parts can outrun the budget on its own. The answer is `403` (or
+   * `429`) in the middle of a perfectly good download:
    *
    *     HTTP 403 for …/parts/WebGL.zip.part28
    *
@@ -728,13 +753,14 @@
     validate(config);
     var stream = options.stream || (typeof SKStream !== 'undefined' ? SKStream : null);
     if (!stream || typeof stream.ensureDataset !== 'function') throw fail('the low-memory storage loader did not load');
+    await removeSupersededCaches(config, options, stream);
     var base = archiveBase(config, options.base);
     var archive = config.assetArchive;
     var partList = parts(config, base);
     // Every request for a part goes through this fetch — the plan's range
     // requests as well as the download — so a host that refuses a part is
     // asked for again from the mirror named in the descriptor, and a host
-    // that is rate limiting us is waited out, instead of failing a 1.19 GB
+    // that is rate limiting us is waited out, instead of failing a 1.72 GiB
     // download a third of the way in.
     var limit = archiveRateLimit(options);
     var fetchImpl = archiveFetch(config, options, base, limit);
@@ -815,7 +841,8 @@
       writerFactory: options.writerFactory,
       preferDisk: true,
       allowMemoryFallback: false,
-      // The archive is 75 parts: one at a time is minutes of round trips.
+      // Split archives require too many serial round trips; parts are fetched
+      // concurrently, with exact sizing supplied by the pinned descriptor.
       concurrency: options.concurrency || 6,
       fetchImpl: fetchImpl,
       retryAfter: retryAfter,
@@ -1263,6 +1290,7 @@
     var cache = options.cache || (typeof SKAssetCache !== 'undefined' ? SKAssetCache : null);
     if (!cache && typeof require === 'function') cache = require('./asset-cache.js');
     if (!stream || !cache) throw fail('the disk-backed lazy asset loader did not load');
+    await removeSupersededCaches(config, options, stream);
     var bundleCache = cache.createBundleCache({ stream: stream, buildId: config.buildId + ':' + config.assetArchive.cacheKey,
       workerUrl: options.workerUrl, budgetBytes: options.bundleCacheBytes, onLog: options.onLog });
     var archiveOptions = Object.assign({}, options, { stream: stream, buildId: config.buildId, bundleCache: bundleCache });
@@ -1356,6 +1384,7 @@
     if (!target || typeof target.fetch !== 'function') throw fail('fetch is not available for the asset mount');
     var previous = target.fetch.bind(target);
     var onAsset = options.onAsset || function () {};
+    var onAssetError = options.onAssetError || function () {};
     var onVideo = options.onVideo || function () {};
     // Optional: hand the placeholder bytes to the page so it can stage them
     // in Unity's own heap (see play.html → stageInWasmHeap).
@@ -1434,6 +1463,12 @@
       onAsset(entry.filename);
       return archive.blobFor(entry).then(function (blob) {
         return rangeResponse(blob, rangeHeader);
+      }).catch(function (error) {
+        // A lazy ZIP part can fail after Unity has started. Do not turn that
+        // into a swallowed fetch miss: preserve the rejection for Unity and
+        // give the page a chance to show the failed bundle to the player.
+        try { onAssetError(entry.filename, error); } catch (callbackError) {}
+        throw error;
       });
     };
 

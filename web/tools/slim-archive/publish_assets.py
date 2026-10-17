@@ -11,7 +11,7 @@ clone — and referenced by a lightweight tag:
     https://raw.githubusercontent.com/<owner>/<repo>/<tag>/parts/<name>
 
 Usage:
-    publish_assets.py --parts-dir /tmp/hkss/slim-parts --tag slim-assets \
+    publish_assets.py --parts-dir /tmp/hkss/slim-parts --tag art-preserved-YYYYMMDD \
         [--repo owner/name] [--workers 4] [--dry-run]
 """
 import argparse
@@ -79,7 +79,8 @@ def create_blob(path, repo):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--parts-dir", required=True)
-    ap.add_argument("--tag", default="slim-assets")
+    ap.add_argument("--tag", required=True,
+                    help="new version tag (for example art-preserved-YYYYMMDD)")
     ap.add_argument("--repo", default="kinggerb/silksongcode")
     ap.add_argument("--prefix", default="parts")
     ap.add_argument("--workers", type=int, default=4)

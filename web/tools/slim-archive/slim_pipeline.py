@@ -8,19 +8,20 @@ were):
   1. cutscene videos - the MP4 payloads streamed out of a `.resource` node are
      replaced with the tiny placeholder MP4 this repository already uses for
      prepared builds, zero-padded to the original length;
-  2. duplicate textures - a Texture2D whose image data is byte-identical to one
-     already seen anywhere in the archive is emptied out in place (its first
-     BC7 block repeated: a legal, flat texture of the same size).  Nothing else
-     can dedupe across bundle boundaries, because each bundle is its own ZIP
-     entry and a deflate window cannot span two entries;
-  3. meshes - the vertex/index blobs of every Mesh are zeroed, leaving the
+  2. meshes - the vertex/index blobs of every Mesh are zeroed, leaving the
      counts and the packing metadata intact, so the mesh still loads as an
      empty mesh instead of the 3D geometry a 2D game never draws;
-then every bundle is written back with LZ4 blocks (keeping the container the
+  3. optionally, repeated textures - `--textures` replaces later byte-identical
+     Texture2D image payloads with a repeated 16-byte block. This is lossy, not
+     deduplication: the objects are still in their own bundles and their art is
+     destroyed. It is disabled by default; use only for a deliberately
+     art-stripped build.
+
+Then every bundle is written back with LZ4 blocks (keeping the container the
 player expects) and packed into one deflate ZIP.
 
 Usage:
-    slim_pipeline.py bundles [--only a,b] [--verify] [--out DIR]
+    slim_pipeline.py bundles [--only a,b] [--textures] [--no-textures] [--out DIR] [--stats FILE]
     slim_pipeline.py zip     [--src DIR] [--out FILE] [--part-size N]
 """
 import argparse
@@ -73,7 +74,7 @@ def mp4_kind(head):
 
 class Slimmer:
     def __init__(self, src, out, placeholder, log=print,
-                 videos=True, textures=True, meshes=True):
+                 videos=True, textures=False, meshes=True):
         self.src = src
         self.out = out
         os.makedirs(out, exist_ok=True)
@@ -311,8 +312,14 @@ def main():
     b.add_argument("--out", default="/tmp/hkss/slim")
     b.add_argument("--placeholder", default="/tmp/hkss/placeholder.mp4")
     b.add_argument("--only", default="")
+    b.add_argument("--stats", default="",
+                   help="write build statistics here (default: <out>/slim-stats.json)")
     b.add_argument("--no-videos", action="store_true")
-    b.add_argument("--no-textures", action="store_true")
+    b.add_argument("--textures", dest="textures", action="store_true",
+                   help="replace later byte-identical textures with flat blocks (lossy; disabled by default)")
+    b.add_argument("--no-textures", dest="textures", action="store_false",
+                   help="keep all textures unchanged (the default)")
+    b.set_defaults(textures=False)
     b.add_argument("--no-meshes", action="store_true")
     z = sub.add_parser("zip")
     z.add_argument("--src", default="/tmp/hkss/slim")
@@ -328,7 +335,7 @@ def main():
             names = [n for n in names if any(w in n for w in want)]
         print("bundles: %d" % len(names))
         s = Slimmer(a.src, a.out, a.placeholder,
-                    videos=not a.no_videos, textures=not a.no_textures,
+                    videos=not a.no_videos, textures=a.textures,
                     meshes=not a.no_meshes)
         t0 = time.time()
         s.run(names)
@@ -336,8 +343,12 @@ def main():
             s.tot["bundle.before"] / MIB, s.tot["bundle.after"] / MIB, time.time() - t0))
         for k in sorted(s.tot):
             print("   %-24s %d" % (k, s.tot[k]))
-        with open("/tmp/hkss/slim-stats.json", "w") as fh:
+        stats_path = a.stats or os.path.join(a.out, "slim-stats.json")
+        stats_dir = os.path.dirname(os.path.abspath(stats_path))
+        os.makedirs(stats_dir, exist_ok=True)
+        with open(stats_path, "w") as fh:
             json.dump(dict(totals=dict(s.tot), bundles=s.per_bundle), fh, indent=1)
+        print("stats: %s" % stats_path)
     else:
         build_zip(a.src, a.out, a.parts_dir or None, a.part_size)
 

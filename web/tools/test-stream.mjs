@@ -907,9 +907,8 @@ await test('the in-memory fallback still produces a usable blob when there is no
 section('the concurrent download');
 
 await test('several parts are on the wire at the same time', async () => {
-  // The community build is 75 parts and one part at a time means 75
-  // round trips: the queue fetches a few of them at once and writes each
-  // one at its own offset.
+  // The community build is split into many parts: the queue fetches a few
+  // at once and writes each one at its own offset.
   const dir = path.join(TMP, 'parallel');
   await fsp.mkdir(dir, { recursive: true });
   const { parts, expected } = writeChunks(dir, 12, 4096);
