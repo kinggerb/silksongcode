@@ -6,10 +6,11 @@
  *   ZIP, split into 100 files: 1986.6 MB on the wire and the same again on
  *   the device, and a good part of it was the high-definition cutscenes — the
  *   one thing in the archive a phone can never hold. The pinned archive is
- *   now the slimmed 1194.1 MB / 75 parts and says so (`assetArchive.slim`), so
- *   this path is skipped for it; it is what keeps a build that is *not*
- *   slimmed — or one whose videos and other platforms are separate entries —
- *   from paying for files the player never reads.
+ *   now the art-preserving 1761.75 MiB / 111 parts and says so
+ *   (`assetArchive.slim`), so this path is skipped for it; eager delivery is
+ *   the default and `?assets=lazy` is opt-in. This path still keeps a build
+ *   that is *not* slimmed — or one whose videos and other platforms are
+ *   separate entries — from paying for files the player never reads.
  *
  * What this module does
  *   A ZIP is a sequence of *local records* (a header plus the compressed

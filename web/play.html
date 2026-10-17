@@ -3171,7 +3171,10 @@
       currentStage = 'download community assets';
       markStage(currentStage);
       setStatus('Downloading the game asset archive — keep Safari open on Wi-Fi');
-      var archiveMode = params.get('assets') === 'eager' || !source.assetArchive.slim ? 'eager' : 'lazy';
+      // Lazy part fetching is opt-in until it has been proven against a full
+      // real-device boot. Eager mode caches the full ZIP before Unity starts;
+      // zip.js verifies each requested bundle's CRC when it is extracted.
+      var archiveMode = params.get('assets') === 'lazy' && source.assetArchive.slim ? 'lazy' : 'eager';
       log('asset loading mode: ' + archiveMode);
       var assetOptions = {
         // The slimmer archive is published on its own (the build files stay on
@@ -3188,9 +3191,9 @@
         stream: SKStream,
         zip: window.zip,
         // GitHub hands out a limited number of files an hour to a page that is
-        // not signed in, and the archive is 75 of them: a refusal in the middle
-        // of the download is a rate limit, and the loader waits it out instead
-        // of giving up. ?archiveWait=<minutes> says how long it may go on for
+        // not signed in. A refusal in the middle of the multi-part archive may
+        // be a rate limit, and the loader waits it out instead of giving up.
+        // ?archiveWait=<minutes> says how long it may go on for
         // (90 minutes by default: seven escalating pauses add up to 53 min, and
         // an hour would stop a few minutes short of the window it waits for).
         rateLimitBudgetMs: (function () {
@@ -3246,6 +3249,26 @@
       log('indexed ' + COMMUNITY_ZIP_MOUNT.entryCount + ' files in the community asset ZIP');
       SKCommunityBuild.installFetchMount(window, COMMUNITY_ZIP_MOUNT, {
         onAsset: function (name) { log('asset from local ZIP: ' + name); },
+        onAssetError: function (name, error) {
+          var detail = (error && error.message) || String(error || 'unknown ZIP read error');
+          var message = 'Could not load game bundle ' + name + ': ' + detail;
+          if (booted) {
+            showRecover('A requested game bundle could not be read. ' + message + ' Reload to try again.');
+            return;
+          }
+          // Unity versions differ in how they report a rejected StreamingAssets
+          // fetch. Surface the originating bundle failure here as well, so a
+          // failed lazy part cannot leave a black title screen with only a log.
+          logError('asset from local ZIP failed: ' + message);
+          screenEl.classList.remove('hidden');
+          fpsEl.classList.add('hidden');
+          setStatus('Could not load a game asset');
+          errEl.textContent = message + '\n\nThe local ZIP part for this bundle failed. Reload to retry; if it persists, use ?assets=eager and check Menu ▸ Log.';
+          startBtn.textContent = 'Try again';
+          startBtn.classList.remove('hidden');
+          errEl.classList.remove('hidden');
+          startBtn.onclick = function () { location.reload(); };
+        },
         // The cutscenes are answered with a placeholder container instead of
         // the real (hundreds of megabytes) video, and the bytes are staged in
         // Unity's own heap so the page does not keep a second copy.

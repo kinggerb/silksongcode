@@ -16,12 +16,13 @@ project homepage to `web/play.html` while preserving the query and hash, and the
 root `.nojekyll` file prevents Jekyll from transforming the site. The page first
 uses a prepared `web/Build/build-manifest.json` when one is present. If not, it
 uses the pinned community WebGL source in `web/community-build.json`: Unity's
-small compressed entry points are loaded from that source, and its 1194.1 MB
-Addressables payload (one 1194.1 MB ZIP in 75 parts) is streamed into OPFS and read
-bundle-by-bundle on demand, without waiting for the whole archive. See
-[LOADING-OPTIMIZATIONS.md](LOADING-OPTIMIZATIONS.md) for native compilation,
-alternate packaging/hosting and the performance test plan. The
-game payload is not copied into this Git repository. See
+small compressed entry points are loaded from that source, and its art-
+preserving 1,847,328,572-byte Addressables ZIP (1761.75 MiB in 111 parts) is
+streamed into OPFS. Eager full-archive delivery is the default; `?assets=lazy`
+opts into bundle-by-bundle reads before a full game run verifies all lazy
+startup dependencies. See [LOADING-OPTIMIZATIONS.md](LOADING-OPTIMIZATIONS.md)
+for native compilation, alternate packaging/hosting and the performance test
+plan. The game payload is not copied into this Git repository. See
 [`COMMUNITY-BUILD.md`](COMMUNITY-BUILD.md) for storage, network, and source
 notes. `?community=0` disables this fallback; with no local build, the page then
 shows **Game build not found** and links to this guide and `demo.html`.

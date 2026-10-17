@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
+import { randomBytes } from 'node:crypto';
 import { makePlaceholderVideo } from './unity-webdata.mjs';
 
 const WEB = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -13,9 +14,9 @@ const stream = require('../js/stream.js');
 const zip = require('../js/zip.min.js');
 const source = JSON.parse(fs.readFileSync(path.join(WEB, 'community-build.json'), 'utf8'));
 
-// The commit the slim archive was published from, and the two hosts that serve
-// its parts. Both are pinned to it: `slim-assets` is a tag, and a tag can move.
-const PIN = '27e01644b547d353d997ea6b15f0e2d56ef8eb4b';
+// The commit the art-preserving archive was published from, pinned by the
+// descriptor instead of relying on the mutable `art-preserved-20261017` tag.
+const PIN = 'a2c4553a3e40ee536672eabb39341856e0ba35ee';
 const RAW_BASE = 'https://raw.githubusercontent.com/kinggerb/silksongcode/' + PIN + '/parts/';
 const MIRROR_BASE = 'https://cdn.jsdelivr.net/gh/kinggerb/silksongcode@' + PIN + '/parts/';
 
@@ -79,37 +80,38 @@ section('source descriptor');
 await test('the pinned community source has a consistent resumable archive plan', () => {
   eq(community.validate(source), source, 'valid configuration returned');
   eq(source.commit, 'bcbe014765f2f6ca4b1d82ac25755a0299a600ab', 'source commit pinned');
-  eq(source.assetArchive.parts.length, 75, 'all remote archive shards listed');
-  eq(source.assetArchive.total, 1252071320, 'total size matches shard sizes');
+  eq(source.assetArchive.parts.length, 111, 'all remote archive shards listed');
+  eq(source.assetArchive.total, 1847328572, 'total size matches shard sizes');
+  eq(source.assetArchive.previousCacheKeys.join(), 'webgl-assets-bcbe014.zip', 'the old texture-stripped cache is scheduled for deletion');
   const parts = community.parts(source, 'https://assets.example/game/');
   eq(parts[0].url, 'https://assets.example/game/WebGL.zip.part1', 'first shard resolves at the override base');
-  eq(parts.at(-1).bytes, 10557336, 'last shard size is exact');
+  eq(parts.at(-1).bytes, 1834812, 'last shard size is exact');
   eq(community.parts(source)[0].url, source.assetArchive.base + 'WebGL.zip.part1', 'the slim archive names its own base');
-  eq(source.assetArchive.total < 1400000000, true, 'the published archive is the slim one, not the 1986.6 MB original');
+  eq(source.assetArchive.total < 2083139638, true, 'the art-preserving archive is smaller than the 1986.6 MiB original');
 });
 
 await test('the archive parts come from GitHub raw, with jsDelivr as the mirror', () => {
   // jsDelivr refuses a GitHub package larger than its own limit (150 MB, and
-  // this archive is 1.19 GB) with `403 Package size exceeded the configured
+  // this archive is 1.72 GiB) with `403 Package size exceeded the configured
   // limit` — but only for the parts it has not already cached, so a download
-  // gets a few parts in and then dies. raw.githubusercontent.com serves any
+  // can get a few parts in and then die. raw.githubusercontent.com serves any
   // committed blob under 100 MB and a part is 16 MiB, so it leads now and
-  // jsDelivr is the fallback. The bytes did not change; only the order did.
+  // jsDelivr is the fallback. The same published bytes are served by both.
   eq(source.assetArchive.base, RAW_BASE, 'the archive leads with GitHub raw');
   eq(source.assetArchive.mirror, MIRROR_BASE, 'and keeps jsDelivr as its mirror');
   eq(new URL(source.assetArchive.base).host, 'raw.githubusercontent.com', 'base host');
   eq(new URL(source.assetArchive.mirror).host, 'cdn.jsdelivr.net', 'mirror host');
   ok(source.assetArchive.base.includes(PIN), 'the base is pinned to the publish commit');
   ok(source.assetArchive.mirror.includes(PIN), 'and so is the mirror');
-  ok(!source.assetArchive.base.includes('slim-assets'), 'pinned to a commit, not to the moving slim-assets tag');
+  ok(!source.assetArchive.base.includes('art-preserved-20261017'), 'pinned to a commit, not to the moving publication tag');
   // The same relative path has to exist on both hosts, or the fallback would
   // ask for a file that is not there. Part 6 is the one that used to 403.
   eq(community.parts(source)[5].url, RAW_BASE + 'WebGL.zip.part6', 'part 6 resolves on GitHub raw');
   // …and everything else about the archive is exactly as it was published.
-  eq(source.assetArchive.total, 1252071320, 'total unchanged');
-  eq(source.assetArchive.parts.length, 75, 'parts unchanged');
-  eq(source.assetArchive.slim, true, 'slim unchanged');
-  eq(source.assetArchive.cacheKey, 'webgl-assets-bcbe014.zip', 'cacheKey unchanged');
+  eq(source.assetArchive.total, 1847328572, 'published total is pinned');
+  eq(source.assetArchive.parts.length, 111, 'all 111 parts are pinned');
+  eq(source.assetArchive.slim, true, 'the descriptor marks the edited archive as slim');
+  eq(source.assetArchive.cacheKey, 'webgl-assets-bcbe014-art-preserved-20261017.zip', 'new cacheKey invalidates the bad archive');
   eq(source.assetArchive.mime, 'application/zip', 'mime unchanged');
   eq(
     source.base,
@@ -147,14 +149,17 @@ await test('a descriptor with incorrect archive arithmetic is refused', () => {
 
 await test('the archive downloader always requires disk-backed storage', async () => {
   let seen;
+  const removed = [];
   const fakeStream = {
+    removeDatasetPrefix: async (key) => { removed.push(key); return 7; },
     ensureDataset: async (options) => { seen = options; return { file: new Blob(['fake']) }; },
   };
   await community.ensureArchive(source, { stream: fakeStream, base: 'https://assets.example/game/' });
+  eq(removed.join(), 'webgl-assets-bcbe014.zip', 'the obsolete art-stripped archive and its lazy parts are discarded');
   eq(seen.allowMemoryFallback, false, 'a 2 GB archive is never allowed to spill into RAM');
   eq(seen.preferDisk, true, 'OPFS is preferred');
   eq(seen.expectedSize, source.assetArchive.total, 'expected size carried through');
-  eq(seen.parts.length, 75, 'all shards provided to the resumable streamer');
+  eq(seen.parts.length, 111, 'all shards provided to the resumable streamer');
 });
 
 section('the mirrored archive hosts');
@@ -274,7 +279,8 @@ await test('the archive plan reads its index through the same mirrored fetch', a
   eq(typeof readerFetch, 'function', 'the ZIP reader got a fetch');
   ok(readerFetch !== stub.impl, 'the wrapped one');
   eq(readerFetch, seen.fetchImpl, 'and the plan and the download share a single wrapper');
-  const res = await readerFetch(RAW_BASE + 'WebGL.zip.part75', { headers: { Range: 'bytes=0-15' } });
+  const lastPart = community.parts(source).at(-1).url;
+  const res = await readerFetch(lastPart, { headers: { Range: 'bytes=0-15' } });
   eq(res.status, 200, 'a refused range request is answered from the mirror');
   eq(stub.requests[1].init.headers.Range, 'bytes=0-15', 'with the very same byte range');
 });
@@ -692,6 +698,82 @@ await test('the fetch adapter serves ZIP entries, supports byte ranges, and pass
   eq(requests.length, 1, 'only non-ZIP files reached the network');
   restore();
   await mount.close();
+});
+
+await test('lazy ZIP serves requested bundle data and surfaces a failed part', async () => {
+  // Exercise the disk-backed part reader, the ZIP entry lookup and the fetch
+  // mount together. The filler makes the ZIP larger than the central-directory
+  // tail read, so opening the index does not also fetch the bundle at the front.
+  const writer = new zip.ZipWriter(new zip.BlobWriter('application/zip'), { useWebWorkers: false });
+  const expectedBundles = [
+    { path: 'aa/WebGL/packed-lazy.bundle', body: 'Unity requests this Addressables bundle' },
+    { path: 'aa/WebGL/packed-lazy-next.bundle', body: 'Next requested Addressables bundle' },
+    { path: 'aa/WebGL/packed-lazy-scene.bundle', body: 'Scene dependency Addressables bundle' },
+  ];
+  for (const entry of expectedBundles) await writer.add(entry.path, new zip.TextReader(entry.body));
+  await writer.add('unused-filler.bin', new zip.Uint8ArrayReader(randomBytes(96 * 1024)));
+  const zipBlob = await writer.close();
+  const bytes = new Uint8Array(await zipBlob.arrayBuffer());
+  const partSize = 16 * 1024;
+  const shards = [];
+  for (let at = 0; at < bytes.length; at += partSize) shards.push(bytes.slice(at, at + partSize));
+
+  const config = JSON.parse(JSON.stringify(source));
+  config.assetArchive.base = 'https://assets.example/lazy/';
+  config.assetArchive.cacheKey = 'lazy-integration-test.zip';
+  config.assetArchive.total = bytes.length;
+  config.assetArchive.parts = shards.map((shard, index) => ({
+    path: 'WebGL.zip.part' + (index + 1), bytes: shard.length,
+  }));
+  const fakeStream = (failPart, requested) => ({
+    ensureDataset: async (options) => {
+      const url = options.parts[0].url;
+      const part = Number(url.match(/part(\d+)$/)[1]);
+      requested.push(part);
+      if (part === failPart) throw new Error('HTTP 503 for ' + url);
+      return { file: new Blob([shards[part - 1]]), kind: 'network', dispose() {} };
+    },
+  });
+
+  const requested = [];
+  const mount = await community.openLazyArchive(config, {
+    stream: fakeStream(0, requested), zip, skipCompleteCache: true,
+    bundleCacheBytes: 0, concurrency: 3,
+  });
+  const assets = [];
+  const target = { fetch: async () => new Response('network fallback') };
+  const restore = community.installFetchMount(target, mount, { onAsset: (name) => assets.push(name) });
+  for (const entry of expectedBundles) {
+    const response = await target.fetch('https://game.example/StreamingAssets/' + entry.path);
+    eq(await response.text(), entry.body, 'Unity gets every requested bundle from its ZIP entry: ' + entry.path);
+  }
+  eq(assets.join('|'), expectedBundles.map((entry) => entry.path).join('|'), 'the local-ZIP log identifies each requested bundle');
+  ok(requested.includes(1), 'the part containing the requested bundles was fetched');
+  ok(new Set(requested).size < shards.length, 'unrequested ZIP parts were not downloaded');
+  restore();
+  await mount.close();
+
+  const failedRequests = [];
+  const failedMount = await community.openLazyArchive(config, {
+    stream: fakeStream(1, failedRequests), zip, skipCompleteCache: true,
+    bundleCacheBytes: 0, concurrency: 3,
+  });
+  const errors = [];
+  const failedTarget = { fetch: async () => new Response('network fallback') };
+  const restoreFailed = community.installFetchMount(failedTarget, failedMount, {
+    onAssetError: (name, error) => errors.push({ name, message: error.message }),
+  });
+  const message = await rejects(
+    failedTarget.fetch('https://game.example/StreamingAssets/aa/WebGL/packed-lazy.bundle'),
+    /HTTP 503/,
+    'a failed lazy ZIP part'
+  );
+  ok(/WebGL\.zip\.part1/.test(message), 'the error names the part that failed: ' + message);
+  eq(errors.length, 1, 'the page callback was notified exactly once');
+  eq(errors[0].name, 'aa/WebGL/packed-lazy.bundle', 'the error identifies the requested bundle');
+  ok(/HTTP 503/.test(errors[0].message), 'the original part error is preserved');
+  restoreFailed();
+  await failedMount.close();
 });
 
 section('the cutscene bypass');

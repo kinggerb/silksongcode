@@ -10,12 +10,12 @@ current defaults, test results and remaining real-device acceptance work.
 
 There are two different problems to solve:
 
-1. **Repeat visits can unnecessarily download the game again.** A real bug in the OPFS capability probe opens/truncates the production cache file rather than its intended temporary file. Fix this first.
-2. **A genuine first visit must currently cache the entire 1,252,071,320-byte asset archive before Unity starts.** Reducing time to play substantially requires faster delivery, a smaller startup working set, or both.
+1. **Repeat visits can unnecessarily download the game again.** A real bug in the OPFS capability probe opened/truncated the production cache file rather than its intended temporary file; this was a baseline defect and has since been fixed.
+2. **At the audit baseline, a genuine first visit cached the entire 1,252,071,320-byte archive before Unity started.** The current art-preserving descriptor instead points to a 1,847,328,572-byte ZIP, and eager full-archive delivery remains the default. Reducing time to play requires faster delivery, a smaller verified startup working set, or both.
 
 Additional confirmed defects: the six-request setting is clamped to four, worker shutdown waits for an acknowledgement that is never sent, and parallel-download resume incorrectly equates file length with valid downloaded coverage.
 
-This is an analysis, not a deployment or runtime-code change. Existing game assets were not republished or modified.
+At this 2026-10-16 audit baseline, this document was analysis only; the game assets had not yet been republished. The later art-preserving archive publication is described in [COMMUNITY-BUILD.md](COMMUNITY-BUILD.md) and [ARCHIVE-SIZE-BREAKDOWN.md](ARCHIVE-SIZE-BREAKDOWN.md).
 
 ## Scope and confidence
 
@@ -60,16 +60,16 @@ Source: `community-build.json`.
 
 | File/set | Bytes |
 | --- | ---: |
-| Slim Addressables ZIP | 1,252,071,320 |
+| Art-preserving Addressables ZIP | 1,847,328,572 |
 | Unity data, compressed | 15,288,449 |
 | Wasm, compressed | 20,192,325 |
 | Framework, compressed | 104,039 |
 | Loader | 118,453 |
-| **Known total** | **1,287,774,586** |
+| **Known total** | **1,883,031,838** |
 
-This excludes page assets, catalogs, transport overhead, retransmissions, and other runtime requests. The ZIP alone is 1.252 GB decimal / 1.166 GiB / 1,194.1 MiB. The page labels MiB as “MB.”
+This excludes page assets, catalogs, transport overhead, retransmissions, and other runtime requests. The ZIP alone is 1.847 GB decimal / 1.7205 GiB / 1,761.75 MiB. The page labels MiB as “MB.”
 
-There are 75 archive parts: 74 × 16 MiB plus a 10,557,336-byte final part. Raw GitHub is the configured primary host; jsDelivr is the archive mirror. Unity entry points use the upstream jsDelivr root.
+There are 111 archive parts: 110 × 16 MiB plus a 1,834,812-byte final part. Raw GitHub is the configured primary host; jsDelivr is the archive mirror. Unity entry points use the upstream jsDelivr root.
 
 ### Is eight minutes plausible from the download alone?
 
@@ -225,14 +225,14 @@ The original Unity project is not in this repository (`BUILD.md:§1`). The exist
 | ---: | --- | --- | --- |
 | 25 | Split large Addressables groups by scene/region/startup needs | The historical survey lists a 328 MiB compressed all-scenes bundle. Independent bootstrap/region bundles prevent loading a whole game's group for the first room. Requires dependency-aware rebuild/catalog updates. | Large |
 | 26 | Provide a mobile texture/atlas tier | The historical survey identifies textures as the largest category. Halving width and height can quarter raw texel/block count, but does not guarantee a quarter of total download. Preserve sprite metadata/layout and choose supported GPU compression. | Large |
-| 27 | Rebuild genuine shared atlas dependencies | Existing slimming replaces duplicate texture copies with flat-color data; it does not redirect consumers to shared assets. Proper shared groups can eliminate duplicated storage/load work without missing artwork. | Large |
+| 27 | Rebuild genuine shared atlas dependencies | The current art-preserving archive keeps every duplicate texture intact; it does not redirect consumers to shared assets. Proper shared groups could eliminate duplicated storage/load work without missing artwork. | Large |
 | 28 | Defer optional content and audio | Load art collections, later bosses, music/voice banks and unused languages only when required. The original survey reports roughly 402 MiB compressed audio across bundles. Dependencies and saved-game spawn location determine what is actually optional. | Medium–large |
 | 29 | Offer a reduced-audio quality tier | Re-encode music/voices at lower bitrate where acceptable; preserve necessary SFX. Stream long tracks and measure both decode cost and transfer bytes. Do not assume “mute” avoids downloads. | Large |
 | 30 | Tune Unity startup and build configuration from a profiler trace | Release build, no development/profiling payload, safe managed stripping, controlled shader variants, deferred initialization and measured Wasm memory growth can help post-download startup. Changes require a compatible rebuild and regression testing. | Large |
 
-The original archive was 2,083,139,638 bytes. The currently pinned slim ZIP is 1,252,071,320 bytes: about **39.9% smaller already**. Video replacement, duplicate-texture blanking and mesh zeroing are already implemented in `tools/slim-archive/`; do not count those savings again.
+The original archive was 2,083,139,638 bytes. The currently pinned art-preserving ZIP is 1,847,328,572 bytes: about **11.3% smaller**. Video replacement and mesh zeroing are applied by `tools/slim-archive/`; texture replacement is off by default, so the duplicate sprite-atlas art is preserved. Do not count the earlier lossy texture blanking as a current saving.
 
-The slimming edits are size-preserving at the decompressed object-layout level. Zero-filled video/mesh payloads and flat-color texture data compress well, but retain their declared object dimensions/layout/counts. They do not prove corresponding reductions in Unity's allocation or deserialization work. Flat-color duplicate textures are not lossless reference deduplication; loading order does not redirect a reference to the remaining full-color copy. Blanket mesh zeroing can also affect visible geometry. Validate artwork and gameplay across scenes before extending these techniques.
+The video/mesh edits are size-preserving at the decompressed object-layout level. Zero-filled video/mesh payloads compress well, but retain their declared object dimensions/layout/counts; this does not prove corresponding reductions in Unity allocation or deserialization work. The explicit `--textures` option is still destructive: flat-color duplicate textures are not lossless reference deduplication, and loading order does not redirect references to an intact copy. Blanket mesh zeroing can also affect visible geometry. Validate gameplay across scenes before extending these techniques.
 
 Likewise, the survey's multi-GiB fully decompressed totals describe the whole original asset corpus, not measured simultaneous resident memory for every run. Actual Unity residency, copies, GPU uploads and peak memory must be profiled.
 
@@ -291,6 +291,6 @@ The current UI uses coarse/reused stages (including a generic “Loading into me
 
 ### Illustrative target, not a promise
 
-If a measured startup dependency set were 200 MB instead of the full 1.252 GB, its transfer floor at 25 Mbps would fall from about **401 seconds to 64 seconds**. Unity entry points, decompression, compilation and scene initialization still add time. The repository does not currently establish that a 200 MB bootstrap set is feasible.
+If a measured startup dependency set were 200 MB instead of the full 1.847 GB, its transfer floor at 25 Mbps would fall from about **591 seconds to 64 seconds**. Unity entry points, decompression, compilation and scene initialization still add time. The repository does not currently establish that a 200 MB bootstrap set is feasible.
 
 **Bottom line:** repair the cache-destroying probe first. For genuine first loads, the biggest lever is changing “download the entire game before boot” to “download what is needed to play first,” backed by reliable large-file hosting. UI/CSS minification or a lower render-resolution setting will not eliminate a gigabyte-scale mandatory transfer.

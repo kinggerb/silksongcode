@@ -3,14 +3,18 @@
 ## Goal and status
 
 The target is **three minutes or less to playable gameplay**, not merely to a
-full progress bar. The loader now removes the full-archive-before-boot barrier,
-repairs cache reuse, overlaps native Wasm compilation, and avoids repeated
-bundle extraction where storage allows.
+full progress bar. The loader has an opt-in lazy ZIP path, repairs cache reuse,
+overlaps native Wasm compilation, and avoids repeated bundle extraction where
+storage allows.
 
 **This is not yet a measured three-minute Silksong/iPad result.** Real game
 startup dependencies, bandwidth and device initialization determine the final
 time. Browser integration uses the **exact pinned Unity loader**, but synthetic
 game data/framework and a small real Wasm module; it is not a full-game test.
+Until lazy loading is proven complete in a real game run, the community build
+uses eager archive delivery by default. `?assets=lazy` opts into lazy delivery;
+failed part or bundle reads are surfaced in the page UI rather than silently
+producing an incomplete game.
 
 ## Enabled by default
 
@@ -21,14 +25,17 @@ game data/framework and a small real Wasm module; it is not a full-game test.
 - **Durable completed-part journals** for concurrent downloads. Sparse file
   length is never treated as a valid prefix or proof of completion. Old,
   unjournaled partial files are rebuilt; valid completed caches are preserved.
-- **Lazy split-ZIP reader**: ZIP metadata and only parts covering a requested
-  bundle are downloaded into OPFS. Requested bundle extents prefetch with up
-  to six active downloads on a desktop and three on a phone or tablet
-  (each in-flight part holds a 16 MiB buffer), configurable between one and
-  eight. There is no automatic whole-game prefetch competing with startup.
+- **Lazy split-ZIP reader (`?assets=lazy`, opt-in)**: ZIP metadata and only
+  parts covering a requested bundle are downloaded into OPFS. Requested bundle
+  extents prefetch with up to six active downloads on a desktop and three on a
+  phone or tablet (each in-flight part holds a 16 MiB buffer), configurable
+  between one and eight. There is no automatic whole-game prefetch in this
+  mode. Eager full-archive delivery remains the default until end-to-end game
+  startup proves that lazy requests cover every required bundle.
 - **Existing complete ZIP reuse**, without copying it into the new part cache.
-  Corrupt legacy indexes/bundles invalidate that cache and recover through lazy
-  parts instead of getting stuck on a bad old completion marker.
+  Corrupt legacy indexes/bundles invalidate that cache and recover through the
+  eager path; lazy mode recovers through its part cache rather than getting
+  stuck on a bad old completion marker.
 - **Bounded extracted-bundle cache**: at most 512 MiB by default; old unpinned
   entries are evicted oldest-first. Files already handed to Unity are pinned
   for the session. Web Locks serialize cross-tab writers; browsers without Web
@@ -62,14 +69,18 @@ game data/framework and a small real Wasm module; it is not a full-game test.
 
 The current page caches by content/build identity, not the page deployment
 revision, so changing front-end code does not invalidate unchanged game data.
-Saves remain in their existing IndexedDB storage; asset-cache operations do not
-clear saves.
+For this art-preserving republish, the descriptor deliberately changes the
+archive `cacheKey` and removes the named previous ZIP plus its lazy-part shards
+from OPFS before fetching the replacement. Saves remain in their existing
+IndexedDB storage; this archive migration does not clear saves or unrelated
+cached datasets.
 
 ## Controls and fallbacks
 
 | Query | Meaning |
 | --- | --- |
-| `?assets=eager` | Original full-ZIP-before-boot path, now with cache/resume fixes |
+| default / `?assets=eager` | Full ZIP is cached before Unity starts; eager remains the default until lazy bundle coverage is verified in a full game run |
+| `?assets=lazy` | Opt into downloading ZIP parts only as bundles are requested; read failures appear as page errors |
 | `?streaming=0` | Stock buffered Wasm path; verified gzip guard still applies |
 | `?downloads=4` | Limit lazy part downloads (1–8; default 3 on a phone/tablet, 6 on a desktop) |
 | `?bundleCacheMB=0` | Disable optional extracted-bundle disk cache |
@@ -145,21 +156,23 @@ For production object storage/CDN configure the equivalent headers there.
 
 ## Validation performed
 
-- `cd web && npm ci && npm test`: **187 tests across ten suites** (baseline 156,
-  plus delivery/packaging and loading regressions). Covers real writer code
-  through a storage model, out-of-order interruption/recovery, exact build
-  matching, timeouts, CRC, digests, budgets, lazy reads, direct bundles and
-  preserve/STORE/deflate repackaging.
-- `npm run test:browser`: Chromium with **real OPFS synchronous-access workers**,
-  Cache API, IndexedDB, native decompression and Wasm. Exact upstream loader
-  digest/hook is exercised, not a lookalike loader. Cold lazy, warm lazy, eager,
-  warm eager, stock-Wasm fallback, raw gzip, native HTTP gzip, ranges, saved
-  data retention, two simultaneous cold tabs with shared cache pins, and stalled
-  body cleanup pass without uncaught page errors.
-- Synthetic browser fixture: **374,370 of 1,160,802 archive bytes** fetched
-  before cold ready (32.3%); **zero archive bytes on warm ready**. Observed local
-  fixture timings were subsecond after warm-up. These are functional/transfer
-  regression results, **not full-game or iPad performance claims**.
+- `cd web && npm install --no-audit --no-fund`, then
+  `node web/tools/test-all.mjs`: **202 tests across ten suites**, all passing.
+  Coverage includes durable cache migration/resume, exact descriptor and part
+  sizes, lazy bundle errors, CRC/digests, budgets, direct bundles, page error
+  UI and lossless preserve/STORE/deflate packaging.
+- `npm run test:browser`: Chromium **153.0.8010.0** with real OPFS workers,
+  Cache API, IndexedDB, native decompression and Wasm, using the exact pinned
+  upstream loader. Cold lazy requests fetched all three requested synthetic
+  bundles byte-for-byte while leaving an 800 KB middle entry unused; warm lazy
+  fetched zero archive bytes. The default eager path fetched the full archive,
+  two cold tabs shared requests, WebGL pixels were read across frames, and no
+  uncaught browser errors occurred.
+- Synthetic browser fixture: **560,096 of 1,280,992 archive bytes** fetched
+  on cold lazy startup (43.7%); **zero** on warm lazy, and **1,280,992** on the
+  default eager path. Runs completed in under a second after warm-up. These are
+  functional/transfer regression results, **not full-game or iPad performance
+  claims**; lazy startup dependencies in the real Silksong game remain unproven.
 - The actual pinned 20,192,325-byte Wasm gzip was natively decoded to
   82,574,276 bytes and stream-compiled successfully in Node (629 imports, 623
   exports). This validates the binary/decode path, not gameplay startup.
@@ -193,8 +206,9 @@ GPU allocation (8× the viewport per axis). The shell therefore:
   failure used to be a silent 0 fps log line), and restores the error screen
   when a startup failure lands after the loading overlay was hidden;
 - versions the shell scripts as `?v=1.1.1` and logs
-  `shell=1.1.1 WebGL2`. Game-data cache keys, saves and downloaded assets
-  are untouched. The reported 2 GiB wasm heap is real (the pinned binary
+  `shell=1.1.1 WebGL2`. That renderer fix did not change the game-data cache
+  keys, saves or downloaded assets; the later archive-only cache migration is
+  described above. The reported 2 GiB wasm heap is real (the pinned binary
   ignores the heap size hints); the misleading comments are corrected.
 
 Validation: **191 tests across ten suites** (`cd web && npm ci && npm test`),
@@ -268,7 +282,9 @@ diagnosable and offers a lower-memory start:
   HTML is the mismatch). A jetsam kill is not treated as a corrupt cache,
   and nothing here clears saves or game-data cache keys;
 - shell scripts versioned as `?v=1.1.2`, boot log `shell=1.1.2 WebGL2`.
-  Game-data cache keys, saves and downloaded assets are not invalidated.
+  At that point game-data cache keys, saves and downloaded assets were not
+  invalidated; the later art-preserving archive migration removes only its
+  named old ZIP/part cache and preserves saves and unrelated datasets.
 
 Already confirmed against the pinned framework, and not re-litigated here:
 the framework pushes onto `Module.preRun` (the WebGL 2 guard survives),

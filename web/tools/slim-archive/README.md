@@ -1,18 +1,21 @@
 # slim-archive — rebuilding the pinned Addressables archive
 
-The pinned community archive is a trimmed copy of the upstream
+The pinned community archive is a rebuilt copy of the upstream
 [`web-ports/hollow-knight-silksong`](https://github.com/web-ports/hollow-knight-silksong)
-Addressables ZIP: **1986.6 MB → 1194.1 MB**, with the game still a game. This
-directory holds the tools that build it, plus the publisher that puts it where
-the page can fetch it.
+Addressables ZIP. The published, art-preserving archive is **2,083,139,638 →
+1,847,328,572 bytes** (**1986.6 → 1761.75 MiB**) in 111 parts. The rebuild
+stubs streamed cutscene video and zeroes mesh payloads, but **preserves original
+texture art by default**. Texture replacement is available only as an explicit
+lossy opt-in. This directory holds the bundle editor, ZIP/parts writer, and
+publisher.
 
 | file | what it is |
 | --- | --- |
 | `bundle_tool.py` | reads, patches and rewrites a UnityFS bundle one block at a time |
 | `typetree_read.py` | AssetStudio-style type-tree walker that records the byte span of every field |
-| `treetools.py` | pulls the type trees out of a serialized file |
-| `slim_pipeline.py` | the three edits + the ZIP/parts writer |
-| `publish_assets.py` | commits the parts as git blobs behind a tag, via the API |
+| `treetools.py` | adapts UnityPy's type-tree parser to the local field walker |
+| `slim_pipeline.py` | the video/mesh edits, optional lossy texture edit, ZIP and parts writer |
+| `publish_assets.py` | publishes the parts as Git blobs and creates a lightweight tag via the GitHub API |
 
 ## What it does
 
@@ -20,88 +23,111 @@ Every edit is **size-preserving**: objects are never moved, no object row is
 removed, and the decompressed stream keeps its exact layout, so every path id
 still resolves and the bundle stays valid. Only bytes inside the stream change.
 
-1. **Cutscenes.** Each `VideoClip` in `packed-cinematics` points at an MP4 in
-   the bundle's `.resource` node. The payload is overwritten with the same
-   ~600-byte blank MP4 (`makePlaceholderVideo` in `tools/unity-webdata.mjs`)
-   and zero-padded to its original length: 224 MB gone, the clip still loads.
-   Audio-only MPEG payloads (`soun`) are left alone — that is the game's audio.
-2. **Duplicate textures.** 85 groups of byte-identical `Texture2D` image data
-   ship once per bundle set (the top atlas eleven times). The first copy is
-   kept, every later copy is overwritten with its own first BC7 block repeated:
-   a flat, legal texture of exactly the same size, and 2,789 MB of raw texture
-   data that is never downloaded twice. Nothing else can dedupe it — every
-   bundle is its own ZIP entry, and a deflate window cannot span entries.
-3. **Meshes.** 6,386 `Mesh` vertex/index blobs are zeroed (counts and packing
-   metadata stay), so the geometry a 2D game never draws costs nothing:
-   435 MB.
+1. **Cutscenes.** The 26 streamed video payloads in `packed-cinematics` are
+overwritten with the same ~600-byte blank MP4
+(`makePlaceholderVideo` in `tools/unity-webdata.mjs`) and zero-padded to their
+original lengths. The rebuild stubbed **224,097,829 bytes** of video; audio-only
+MPEG payloads are left alone.
+2. **Meshes.** The vertex/index payloads of 6,386 `Mesh` objects are zeroed,
+while counts and packing metadata stay intact: **456,033,780 bytes** of mesh
+data. This is inherited lossy geometry removal; validate game scenes before
+assuming empty meshes are harmless.
+3. **Textures.** All Texture2D payloads and atlas art are kept unchanged by
+default. `--textures` opts into the old destructive behavior: later byte-
+identical image payloads are replaced with a repeated 16-byte block. That is
+**not deduplication**; each Texture2D remains in its original bundle, but its
+art becomes a flat color. Do not use this flag for the published/community
+build. `--no-textures` remains accepted and explicitly keeps the default
+art-preserving behavior.
 4. **The ZIP.** Bundles are written back with LZ4 blocks (the container the
-   player expects) and deflated into one ZIP, split into 16 MiB parts —
-   small enough for `raw.githubusercontent.com` to serve, whose limit is
-   100 MB per blob. jsDelivr's limit is on the *package*, not the part, and
-   1.19 GB is over it.
+player expects) and deflated into one ZIP, split into 16 MiB parts. The 111
+parts are each below GitHub raw's 100 MB per-blob limit. jsDelivr's limit is on
+the whole GitHub package, not on a part, and the 1.72 GiB package exceeds it.
 
-Measured result: bundles 2,486.5 MB → 1,426.8 MB, ZIP `2,083,139,638` →
-`1,252,071,320` bytes, in 75 parts. Left alone on purpose: audio (402 MB), the
-art-collection atlases (`packed-collections`, 1,833 MB, all unique) and the
-animation data.
+Measured rebuild:
+
+- bundle bytes: `2,486,528,891` → `2,080,369,134` (**2371.3 → 1984.0 MiB**);
+- ZIP bytes: `2,083,139,638` → `1,847,328,572` (**1986.6 → 1761.75 MiB**);
+- parts: **111** × 16 MiB maximum; final part **1,834,812 bytes**;
+- output ZIP: 21 bundle entries; every entry CRC passes;
+- the 111 concatenated parts reproduce the complete ZIP byte-for-byte;
+- the uncompressed UnityFS streams for `sprites-ui`, `sprites-scenery`,
+  `sprites-hero`, and `collections` match the upstream SHA-256 exactly.
+
+Audio, original texture art (including duplicate atlas copies), animation data,
+and all non-video/non-mesh payloads remain untouched. See
+[`../../ARCHIVE-SIZE-BREAKDOWN.md`](../../ARCHIVE-SIZE-BREAKDOWN.md) for the
+measured upstream breakdown and current archive results.
 
 ## Running it
 
-Needs Python 3 and `lz4` (`pip install lz4`); the bundles come out of
-`StreamingAssets/aa/WebGL.zip` of the pinned build.
+The upstream source is pinned to
+`web-ports/hollow-knight-silksong@bcbe014765f2f6ca4b1d82ac25755a0299a600ab`.
+Its `StreamingAssets/aa/WebGL.zip` is split into 100 GitHub blobs. Fetch those
+blobs through the GitHub API (not a raw URL or `curl`), join them, verify the
+ZIP, and extract all 21 bundles before rebuilding. Install the Python
+requirements:
 
 ```sh
-python3 slim_pipeline.py bundles --src bundles --out slim      # ~17 min
-python3 slim_pipeline.py zip --src slim --out slim.zip --parts-dir parts \
-        --part-size 16777216
+python3 -m venv .venv
+. .venv/bin/activate
+pip install lz4 xxhash UnityPy
 ```
 
-`bundles` prints a per-bundle table (`before -> after`, patch counts) and writes
-`slim-stats.json`; `zip` prints the entry table and the part totals. Both run
-in a few hundred megabytes of RAM regardless of archive size.
+From the directory containing the extracted `bundles/`, the 622-byte
+`placeholder.mp4`, and this tool (for example the ignored `.tmp/hkss/` workspace):
+
+```sh
+python3 /path/to/slim_pipeline.py bundles --src bundles --out slim \
+  --placeholder placeholder.mp4
+python3 /path/to/slim_pipeline.py zip --src slim --out slim.zip \
+  --parts-dir parts --part-size 16777216
+```
+
+The `bundles` command defaults to `textures=False`. Add `--textures` only for a
+deliberately art-stripped build; `--no-textures` is still parsed as an explicit
+preservation flag. Bundle processing took about **21 minutes** on the measured
+21-bundle rebuild, dominated by the large `collections` and `scenes` bundles.
+The default stats file is written to `<out>/slim-stats.json`; `--stats FILE`
+chooses another location. `zip` prints the entry table, exact archive size, and
+part totals. Memory scales with the largest bundle; the measured peak during
+the full run was about 1.7 GiB.
 
 ## Publishing
 
-GitHub *release* assets are the natural home, but their upload endpoint
-(`uploads.github.com`) is not reachable from every network. The git data API is,
-so the parts are committed straight through it — no branch is touched, nothing
-lands in a local clone — and referenced by a lightweight tag:
+The parts were published under the new tag `art-preserved-20261017`; the
+resulting publish commit is
+`a2c4553a3e40ee536672eabb39341856e0ba35ee`. The descriptor pins the commit, not
+the mutable tag. No branch is touched and no ZIP/part files enter the working
+clone. To publish another version, choose a new tag and update
+`web/community-build.json` with the commit and exact part sizes:
 
 ```sh
-python3 publish_assets.py --parts-dir parts --tag slim-assets \
-        --repo kinggerb/silksongcode --workers 6
+python3 publish_assets.py --parts-dir parts \
+  --tag art-preserved-YYYYMMDD --repo kinggerb/silksongcode --workers 4
 ```
 
-It prints the two URLs that serve the result:
-
-```
-https://raw.githubusercontent.com/kinggerb/silksongcode/slim-assets/parts/
-https://cdn.jsdelivr.net/gh/kinggerb/silksongcode@<commit>/parts/
-```
-
-`community-build.json` keeps the **raw.githubusercontent** URL as
-`assetArchive.base` and records the jsDelivr one as `assetArchive.mirror`, both
-pinned to the publish *commit* rather than to the tag, which can move.
-
-That order used to be the other way round, on the theory that the CDN the build
-files already use was the safer host and CORS is known to work there. It is not:
-jsDelivr refuses a GitHub *package* larger than 150 MB, and this one is
-~1.19 GB, so it answers `403 Package size exceeded the configured limit of 150
-MB` for every part it has not already cached — a download reached part 6 of 75
-and stopped there. raw.githubusercontent.com serves any committed blob under
-100 MB and a part is 16 MiB, so it always answers; jsDelivr is still worth
-keeping as the mirror for the parts it does serve. `js/community-build.js`
-retries a refused or unreachable part once against the mirror (`mirrorFetch`),
-so either host can lead, and swapping the two is a descriptor-only change —
-nothing has to be rebuilt or re-published. The page can be pointed at either by
-hand with `?archiveBase=https://host/path/`.
+The publisher prints the tag-based URLs and the pinned commit URL. The
+`community-build.json` descriptor records the raw GitHub URL as
+`assetArchive.base` and the jsDelivr URL as `assetArchive.mirror`, both pinned
+to the publish commit. GitHub raw serves every part because each is below 100
+MB. jsDelivr refuses uncached parts of packages over 150 MB; the current
+package is 1.72 GiB, so raw leads and jsDelivr is only the fallback.
 
 ## What the page does differently
 
-`assetArchive.slim = true` tells `js/community-build.js` that there is nothing
-left to leave out, so it skips the plan step (a couple of hundred range
-requests) and downloads the parts directly, six at a time. The cutscene bypass
-in the fetch mount stays as a safety net for any video path that is not in the
-archive. The download itself runs through `mirrorFetch`, which asks
-`assetArchive.mirror` once for any part the base refuses (403/404/408/429/5xx)
-or cannot be reached for.
+`assetArchive.slim = true` tells `js/community-build.js` there is no further
+entry-level pruning to do. **Eager delivery is the default:** all parts stream
+to OPFS before Unity starts. `?assets=lazy` opts into loading ZIP metadata and
+requested bundles on demand; this has synthetic delivery/failure tests, but it
+is not the default until a full real-game run proves every startup dependency.
+A failed requested part or bundle is surfaced in the page UI and propagated as
+an error instead of silently mounting incomplete assets.
+
+The cutscene bypass in the fetch mount stays as a safety net for any video
+path that is not in the archive. Both loading modes use `mirrorFetch`, which
+asks `assetArchive.mirror` once for any part the base refuses (403/404/408/429/
+5xx) or cannot reach. See
+[`../../COMMUNITY-BUILD.md`](../../COMMUNITY-BUILD.md) and
+[`../../LOADING-OPTIMIZATIONS.md`](../../LOADING-OPTIMIZATIONS.md) for storage,
+rate-limit and loading-mode behavior.

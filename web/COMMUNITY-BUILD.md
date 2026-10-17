@@ -13,99 +13,116 @@ at commit `bcbe014765f2f6ca4b1d82ac25755a0299a600ab`. The related
 fork in the same project lineage. This source was selected at the repository
 maintainer's request, with their stated permission to reuse it.
 
-## Optimized startup (current default)
+## Lazy loading (opt-in; eager is the default)
 
-The player now downloads only ZIP parts needed by requested bundles, with a
-bounded extracted-bundle cache and native Wasm compilation overlapping asset
-setup. Existing complete archives are reused. `?assets=eager` retains the old
-full-download path. See [LOADING-OPTIMIZATIONS.md](LOADING-OPTIMIZATIONS.md) for
-implementation, tests, alternate hosting, direct bundles and controls.
+By default, the player downloads the complete art-preserving ZIP to OPFS before
+Unity starts; the ZIP is never concatenated in RAM. `?assets=lazy` opts into
+on-demand parts and bundle extraction, with a bounded extracted-bundle cache
+and native Wasm compilation overlapping asset setup. Synthetic integration
+tests cover requested-bundle delivery and visible failures, but a complete
+real-game/browser boot has not yet proven every startup dependency, so lazy
+loading is not the default. See [LOADING-OPTIMIZATIONS.md](LOADING-OPTIMIZATIONS.md)
+for implementation, tests, alternate hosting, direct bundles and controls.
 
 ## What the page loads
 
 - Unity loader, framework, data, and wasm files are fetched from the pinned
   source CDN.
-- The Addressables ZIP is split into 75 files totalling exactly
-  `1,252,071,320` bytes (about `1.17 GiB`). It is the *slim* rebuild of the
-  upstream archive (see [The slim archive](#the-slim-archive)) and lives in
-  this repository, published under the `slim-assets` tag and served by
-  `raw.githubusercontent.com`, with jsDelivr recorded as a mirror (see [Two
-  hosts for the archive parts](#two-hosts-for-the-archive-parts)). The player
-  downloads only pieces touched by ZIP metadata/requested bundles into OPFS.
-  Up to six requested parts download at a time (configurable 1–8), streamed to
-  disk with bounded write buffers. Completed pieces survive reloads.
+- The Addressables ZIP is split into 111 files totalling exactly
+  `1,847,328,572` bytes (**1.72 GiB**; the page displays `1761.7 MB`). It is the
+  art-preserving rebuild of the upstream archive (see [The slim archive](#the-slim-archive)),
+  published under the `art-preserved-20261017` tag and pinned to commit
+  `a2c4553a3e40ee536672eabb39341856e0ba35ee`. GitHub raw serves the parts and
+  jsDelivr is recorded as a mirror (see [Two hosts for the archive parts](#two-hosts-for-the-archive-parts)).
+  Eager mode streams all 111 parts to OPFS before Unity starts. In opt-in lazy
+  mode, only the parts covering ZIP metadata and requested bundles are fetched.
+  Up to six parts download at a time (configurable 1–8), streamed to disk with
+  bounded write buffers. Completed pieces survive reloads.
 - The archive is already slim (`assetArchive.slim`), so the historical pruning
-  step below is skipped. This does not mean every remaining bundle is needed
-  before the first scene; lazy loading prioritizes only requested content.
-- `zip.js` extracts requested bundles, verifies their CRC, and caches extracted
-  output within a quota-aware budget. The ZIP is never concatenated in RAM.
+  step below is skipped. Eager delivery remains default until a full game run
+  proves the lazy dependency set; `?assets=lazy` prioritizes requested bundles.
+- `zip.js` extracts requested bundles and verifies their CRC, surfacing failed
+  reads in the page UI. Extracted output is cached within a quota-aware budget.
+  The ZIP is never concatenated in RAM.
 - A cutscene request is answered with a ~600-byte blank container (the same
   one `prepare-build.mjs` writes into a prepared build) instead of the real
-  video. The upstream archive still holds the high-definition cutscenes, and
-  inflating one of those into a Blob is more memory than a phone tab has to
-  spare. The cutscene plays as a black frame.
+  video. The 26 streamed video payloads were stubbed in the rebuilt archive;
+  cutscenes therefore play as black frames. Audio payloads remain unchanged.
 
 The first run therefore needs Wi-Fi, a normal (non-Private) Safari tab, and
-roughly 1.3 GiB of free storage. Leave the tab in the foreground. GitHub rate
+at least **1.72 GiB** of free storage for the eager archive, plus headroom for
+extracted bundles and Unity. Leave the tab in the foreground. GitHub rate
 limits unauthenticated downloads, so a download can be made to pause part-way
 through — the player waits it out and carries on rather than stopping; see
 [A 403 in the middle of the download](#a-403-in-the-middle-of-the-download).
-Later runs reuse cached parts/extracted bundles (or an existing complete archive). If OPFS or the available quota is
-insufficient, the player will explain that rather than trying to put a
-multi-gigabyte ZIP in RAM.
+On the first run after this archive update, the descriptor's new cache key
+causes the loader to remove the old texture-stripped ZIP and its cached lazy
+parts before downloading; save data and unrelated OPFS files are not cleared.
+Later runs reuse the new cached parts/extracted bundles (or an existing complete
+archive). If OPFS or the available quota is insufficient, the player explains
+that rather than trying to put a multi-gigabyte ZIP in RAM.
 
 ## The slim archive
 
 The pinned archive is a rebuilt copy of the upstream one: `tools/slim-archive/`
 reads each bundle, edits it **in place** — object rows, offsets and the
-decompressed stream layout never move, so Unity still sees 4.2 million objects
-with the same path ids — and writes the bundles into a new, ordinary ZIP that
-the page reads exactly as before.
+size-preserving serialized layout stay in place — and writes the bundles into
+a new ordinary ZIP. Texture replacement is **off by default**, so the original
+sprite-atlas art that was blanked in the bad archive is preserved. The lossy
+`--textures` flag is an explicit opt-in; keep it off for publication.
 
-| what | how | removed |
-| --- | --- | --- |
-| the 26 cutscene MP4s in `packed-cinematics` | replaced by the same ~600-byte blank MP4 the page already serves for a cutscene, zero-padded to the original length | 224 MB |
-| 85 byte-identical sprite-atlas groups (`sactx-0-8192x4096-BC7-Core` alone ships eleven times) | every copy after the first is emptied out in place: same size, same format, same name, and it renders as one flat colour | 2,789 MB |
-| 6,386 meshes (a 2D game never draws the 3D geometry) | vertex and index blobs zeroed, counts and packing metadata kept, so the mesh still loads | 435 MB |
-| audio (402 MB), the art-collection atlases (1,833 MB, every one unique), animation data | left alone | — |
+| what | how | result |
+| --- | --- | ---: |
+| 26 streamed cutscene-video payloads in `packed-cinematics` | replaced with the same ~600-byte blank MP4 the page serves for a cutscene, zero-padded to original length | 224,097,829 bytes stubbed |
+| all Texture2D and sprite-atlas art | no texture payload edits in the published build | preserved |
+| 6,386 meshes (a 2D game never draws the 3D geometry) | vertex/index payloads zeroed; counts and packing metadata kept | 456,033,780 bytes zeroed |
+| audio, all art-collection atlases, animation data | left alone | — |
 
-Bundles: 2,486.5 MB → 1,426.8 MB. ZIP: `2,083,139,638` → `1,252,071,320`
-bytes, i.e. **1986.6 MB → 1194.1 MB**, which is the figure the page shows
-before the first download. The parts are 16 MiB each (75 of them) so that
-`raw.githubusercontent.com` can serve them, whose limit is 100 MB per blob.
-jsDelivr's limit is on the *package* rather than the part, and 1.19 GB is over
-it — see [Two hosts for the archive parts](#two-hosts-for-the-archive-parts).
+Bundles: `2,486,528,891` → `2,080,369,134` bytes (**2371.3 → 1984.0 MiB**).
+ZIP: `2,083,139,638` → `1,847,328,572` bytes (**1986.6 → 1761.75 MiB**), which
+the page displays as `1761.8 MB`. The archive is split into 111 parts of at most
+16 MiB (the final part is 1,834,812 bytes), so GitHub raw's 100 MB per-blob
+limit is respected. jsDelivr's 150 MB limit applies to the whole package, and
+1.72 GiB exceeds it — see [Two hosts for the archive parts](#two-hosts-for-the-archive-parts).
 
-Rebuilding the archive and re-publishing it are one command each:
+The published archive was rebuilt and verified with ZIP CRC checks, exact
+source/output bundle names, matching concatenated-part and ZIP SHA-256 hashes,
+and matching uncompressed UnityFS streams for four art-bearing bundles. The
+new parts live under the `art-preserved-20261017` tag; the descriptor pins the
+publish commit so a moved tag cannot change the downloaded bytes.
 
 ```sh
-python3 tools/slim-archive/slim_pipeline.py bundles   # edit the bundles
-python3 tools/slim-archive/slim_pipeline.py zip       # ZIP + parts + hashes
-python3 tools/slim-archive/publish_assets.py --parts-dir <dir> --tag slim-assets
+python3 tools/slim-archive/slim_pipeline.py bundles --src bundles --out slim \
+  --placeholder placeholder.mp4
+python3 tools/slim-archive/slim_pipeline.py zip --src slim --out slim.zip \
+  --parts-dir parts --part-size 16777216
+python3 tools/slim-archive/publish_assets.py --parts-dir parts \
+  --tag art-preserved-20261017
 ```
 
 See [`tools/slim-archive/README.md`](tools/slim-archive/README.md) for the
-details, including why the page's own pruning step is skipped for this archive.
+source-fetch, dependencies, rebuild, verification and publish details.
 
 ## The smaller archive
 
-> **Measured note (`bcbe0147`):** the checks below skip **0 of the 21 entries**
-> of the upstream build. The archive holds only Addressables bundles — the
-> 43 cutscene MP4s (217 MiB) are *inside* `packed-cinematics`, the audio
-> (402 MiB) inside the four `packed-audio-*` bundles — so nothing matches the
-> video/other-platform rules and the whole 1986.6 MiB is downloaded. The full
-> byte-by-byte breakdown, including 479 MiB of duplicated sprite atlases, is in
+> **Measured note (`bcbe0147`):** the pruning checks below skip **0 of the 21
+> entries** of the untouched upstream build. It contains only Addressables
+> bundles — the cutscene MP4s are inside `packed-cinematics` and audio is inside
+> four `packed-audio-*` bundles — so those entry-level rules cannot omit them.
+> The published art-preserving rebuild instead stubs the 26 streamed video
+> payloads inside the bundle. The full source breakdown, including the 479 MiB
+> of duplicated atlases, is in
 > [`ARCHIVE-SIZE-BREAKDOWN.md`](ARCHIVE-SIZE-BREAKDOWN.md). The pruning path
 > still applies to builds whose videos are separate entries (and to the
 > prepared-build path, where `prepare-build.mjs` replaces loose videos).
 
-The pinned archive is one 1194.1 MB ZIP of game data in 75 parts, dominated by
-sprite-atlas textures (the 2,789 MB of duplicated atlases are already gone) and
-audio (402 MiB); its 43 cutscene movies are 600-byte blanks inside
-`packed-cinematics`. There is nothing left for the planning path below to leave
-out of *this* archive — it says so (`assetArchive.slim`) and the page skips the
-check — but it is still what stops a build that ships its videos and other
-platforms as separate entries from paying for files the player never reads.
+The pinned art-preserving archive is `1,847,328,572` bytes (**1.72 GiB**, 111
+parts). It keeps all sprite-atlas textures, including the byte-identical atlas
+copies, and the 402 MiB of audio. Its cutscene-video payloads are placeholders;
+mesh payloads are zeroed. The archive is marked `assetArchive.slim`, so the
+historical planning step below is skipped. Eager full-ZIP delivery remains the
+default; `?assets=lazy` opts into requested-bundle loading and is not yet
+verified by a complete real-game boot.
 
 For such a build the player looks before it leaps. A ZIP keeps its index (the *central
 directory*) at the end of the file, and that index says where every file
@@ -146,15 +163,14 @@ without byte ranges gets the whole archive instead.
 
 The build files (`Build/*.unityweb`, the loose StreamingAssets) remain hosted at
 the pinned external source; they are **not** committed under `web/Build/`. The
-trimmed archive is published from this repository instead, as blobs under the
-`slim-assets` tag — never as working-tree files, so no clone has to carry it —
-and `assetArchive.base` pins the raw.githubusercontent.com URL that serves
-them, with `assetArchive.mirror` recording the jsDelivr one. A published payload
-does make the repository larger on GitHub's side (about 1.2 GB of history); drop
-the tag with `git push origin :refs/tags/slim-assets` if that is ever unwanted.
-The source descriptor contains the exact commit, file sizes, and URLs. Update
-that descriptor together if the upstream build changes. The site requires
-access to the archive host at runtime.
+art-preserving archive is published from this repository as blobs under the new
+`art-preserved-20261017` tag — never as working-tree files — and
+`assetArchive.base` pins the publish commit on raw.githubusercontent.com, with
+`assetArchive.mirror` recording the jsDelivr URL. This publication adds about
+1.72 GiB of GitHub-side blobs; the prior bad archive/tag remains separate. The
+source descriptor contains the exact commit, file sizes and URLs. Update that
+descriptor together if the upstream build changes. The site requires access to
+the archive host at runtime.
 
 To disable this fallback and use only a prepared local/CDN build, add
 `?community=0` to the play URL. To force a different home for the *archive*
@@ -173,24 +189,26 @@ The parts are published once, and two hosts serve them — but not equally:
 | host | recorded as | the limit that matters |
 | --- | --- | --- |
 | `raw.githubusercontent.com` | `assetArchive.base` | serves any committed blob under 100 MB, and a part is 16 MiB, so every part is served |
-| `cdn.jsdelivr.net` | `assetArchive.mirror` | refuses a GitHub *package* larger than 150 MB, and this one is ~1.19 GB |
+| `cdn.jsdelivr.net` | `assetArchive.mirror` | refuses a GitHub *package* larger than 150 MB, and this one is 1.72 GiB |
 
 jsDelivr's refusal is per request rather than per package, and only for the
-parts it has not already stored — so a download did not fail at the start. It
-got as far as the first part jsDelivr had not cached and died there:
+parts it has not already stored — so a download may not fail at the start. In
+the earlier 75-part publication, it got as far as the first part jsDelivr had
+not cached and died there:
 
 ```
 HTTP 403 for https://cdn.jsdelivr.net/gh/kinggerb/silksongcode@<pin>/parts/WebGL.zip.part6
 ```
 
-six parts into seventy-five, with `Package size exceeded the configured limit
-of 150 MB` in the body. The archive bytes were never the problem, and nothing
-had to be rebuilt or re-published: only the order of the two hosts did.
+with `Package size exceeded the configured limit of 150 MB` in the body. The
+current archive has 111 parts and the same package-size limitation; the archive
+bytes are unchanged between the two hosts, so raw remains first and jsDelivr
+only a fallback.
 
 So `assetArchive.base` is GitHub raw, and `assetArchive.mirror` is jsDelivr —
-the host that always answers leads, and the CDN that is quicker *when* it
-answers is the fallback. Both are pinned to the publish commit rather than to
-the `slim-assets` tag, which can move.
+the host that serves each part leads, and the CDN is the fallback. Both are
+pinned to the publish commit rather than to the movable
+`art-preserved-20261017` tag.
 
 `js/community-build.js` wraps the fetch the downloader uses (`mirrorFetch`) so
 that a part which is refused — 403, 404, 408, 429 or any 5xx — or whose host
@@ -207,7 +225,7 @@ and the archive plan read through that one wrapper;
 Raw leads because it serves every part — but not every *request*. GitHub rate
 limits unauthenticated downloads (60 requests an hour per IP since
 [May 2025](https://github.blog/changelog/2025-05-08-updated-rate-limits-for-unauthenticated-requests/)),
-and a part is one request. This archive is **75** of them, so a single first
+and a part is one request. This archive has **111** parts, so a single first
 run can outrun the budget on its own, and the answer is the same `403` a
 browser sees for a file it may not have:
 
@@ -262,8 +280,8 @@ still finishes.
 > **The durable fix is to re-host the archive.** A waiting page is a page the
 > user has to keep open. GitHub *release* assets are served from
 > `objects.githubusercontent.com` with no per-hour request budget and a 2 GB
-> per-file limit; publishing the 75 parts as release assets (one release per
-> publish, pinned by tag) would let the download run at full speed and leave
+> per-file limit; publishing the 111 parts as release assets (one release per
+> publish, pinned by version) would let the download run at full speed and leave
 > raw and jsDelivr as fallbacks. That needs the bytes re-uploaded —
 > `publish_assets.py` would gain a release path — not a page change.
 

@@ -1,14 +1,17 @@
-# What the 1986.6 MB community build is actually made of
+# What the upstream community archive is actually made of
 
-The first run of `play.html` downloads the pinned Addressables archive from
+The pinned upstream source from
 [`web-ports/hollow-knight-silksong`](https://github.com/web-ports/hollow-knight-silksong)
-(`bcbe0147`), and the page reports **1986.6 MB** — exactly
-`2,083,139,638` bytes (`1986.6 MiB` / `2083.1 MB`). This document is a measured
-breakdown of those bytes: every number below was read out of the archive itself
-(the ZIP central directory, then each UnityFS bundle's block table, type list
-and object table), not estimated from names.
+(`bcbe0147`) contains an original Addressables ZIP of **2,083,139,638 bytes**
+(**1986.6 MiB / 2083.1 MB**). The player now uses a rebuilt, art-preserving ZIP
+of **1,847,328,572 bytes** (**1761.75 MiB / 1847.3 MB**) in 111 parts; see
+[§7](#7-the-art-preserving-published-archive) for the exact rebuild and
+verification. Sections 1–6 below describe the measured *upstream* archive
+before editing: every number was read from its ZIP central directory and
+UnityFS bundle metadata, not estimated from names.
 
-Measured on the archive as published; the survey method is described at the end.
+The original source archive was fetched and CRC-checked; the survey method is
+described at the end.
 
 ## 1. The archive is 21 Unity bundles, nothing else
 
@@ -54,9 +57,9 @@ turns into once both compression layers are undone (see §2).
 | – metadata & padding | 389,667,563 (371.6 MiB) | serialized-file headers, type & object tables, alignment |
 
 So the download is not "the game" so much as the game **plus two compression
-passes on top of it**. The 21 bundle files total 2.37 GiB on disk; the game data
-inside them is 9.45 GiB, which is what the tab ends up holding (and, one bundle
-at a time, what it must be able to hold).
+passes on top of it**. The 21 bundle files total 2.37 GiB after ZIP inflation;
+their UnityFS contents total 9.45 GiB when decompressed. Those totals describe
+the complete corpus on disk, not simultaneous resident memory in the browser.
 
 ## 3. The breakdown by content
 
@@ -164,74 +167,84 @@ they are all `packed-*.bundle` UnityFS files. The cutscene videos in this build
 are not loose files at all; they live *inside* `cinematics` as `.resource`
 payload, and the audio is inside four more bundles the same way.
 
-So the page downloads the whole 1986.6 MiB, prints that figure, and the
-cutscene placeholder only fires later, when Unity asks for a video URL. The
-pruning in the docs (`COMMUNITY-BUILD.md` §"The smaller archive") is written
-for builds whose videos are separate entries.
+For the untouched upstream source, the page's ZIP-pruning planner would keep
+all 21 bundles, because the media is embedded inside them. The published
+art-preserving rebuild instead replaces the 26 streamed cutscene payloads in
+`cinematics` with placeholders before making the ZIP; see §7. The planner still
+applies to builds whose videos and other-platform bundles are separate entries.
 
-## 7. What was cut
+## 7. The art-preserving published archive
 
-The measurements above turned into the pinned archive in
-[`tools/slim-archive/`](tools/slim-archive/README.md), rebuilt and republished
-as described in [`COMMUNITY-BUILD.md`](COMMUNITY-BUILD.md) §"The slim archive".
+The upstream measurements above were used to rebuild the pinned archive with
+[`tools/slim-archive/`](tools/slim-archive/README.md). Texture replacement is
+**off by default**: all original Texture2D and sprite-atlas art is retained.
+The lossy `--textures` option remains available only as an explicit opt-in.
 
-| change | how | removed |
+| change | how | result |
 | --- | --- | ---: |
-| the 43 cutscene MP4s (217 MiB, of which 26 are `VideoClip` payloads) | the 26 streamed MP4s are overwritten in place with the ~600-byte blank container and zero-padded | 224 MB |
-| the 85 duplicated atlas groups (2,773 MiB redundant) | every copy after the first is emptied in place — same size, same format, one flat colour | 2,789 MB |
-| 6,386 meshes | vertex/index blobs zeroed, counts kept | 435 MB |
-| audio (402 MB), `packed-collections` (1,833 MB of unique atlases), animation | left alone | — |
+| 26 streamed cutscene-video payloads | replaced in place with the ~600-byte blank MP4 and zero-padded; audio is untouched | 224,097,829 bytes stubbed |
+| 6,386 meshes | vertex/index payloads zeroed in place; object counts and offsets retained | 456,033,780 bytes zeroed |
+| all Texture2D payloads and original art | no texture edits; `--textures` was not used | preserved |
 
-Bundles 2,486.5 MB → 1,426.8 MB; ZIP `2,083,139,638` → `1,252,071,320` bytes
-(**1986.6 MB → 1194.1 MB**, 75 parts of 16 MiB). Every edit is
-size-preserving, and the rewritten bundles were re-read with an independent
-parser (and UnityPy) to confirm the object tables, texture payloads and mesh
-counts survive: 344/344 objects in `sprites-ui`, 70/70 in `cinematics`, mesh
-vertex counts unchanged with zeroed data.
+The 21 bundles total **2,486,528,891 → 2,080,369,134 bytes**
+(**2371.3 → 1984.0 MiB**). The deflate ZIP is
+**2,083,139,638 → 1,847,328,572 bytes** (**1986.6 → 1761.75 MiB**, 111 parts
+of 16 MiB; the final part is 1,834,812 bytes). All ZIP entry CRCs pass, the ZIP
+contains the same 21 bundle names as the upstream source, and concatenating the
+111 delivery parts reproduces the ZIP byte-for-byte. The original uncompressed
+UnityFS streams for `sprites-ui`, `sprites-scenery`, `sprites-hero`, and
+`collections` match their upstream versions by SHA-256, confirming that their
+art and texture payloads were not altered. The pipeline's class/object layout
+remains size-preserving; videos and meshes are the only intended content edits.
+The new `cacheKey` also makes the loader remove the prior texture-stripped ZIP
+and any cached lazy-part shards before fetching this replacement.
 
-Two options in the table below are *not* taken, because they remove content
-rather than redundancy: dropping the four audio bundles (402 MB) and
-`packed-collections` (1,833 MB of unique art atlases, 334 MB of download).
+The removed atlas duplicates and meshes are *not* blanked from the published
+build: that was the prior lossy texture behavior. Dropping the four audio
+bundles or `packed-collections` would remove content and is not done here.
 
 ## 8. What could be cut (measurements first, changes second)
 
+The estimates below are based on the original upstream archive unless they
+explicitly name the current ZIP; they are not additional savings already taken
+by the published art-preserving rebuild.
+
 | option | saves | cost |
 | --- | ---: | --- |
-| Leave the `cinematics` bundle out (43 MP4s, black-frame placeholders as today) | ~217 MiB (10.9 %) | One entry, but Unity's Addressables load of that group has to be handled — needs testing on device |
-| Ship the 85 duplicated atlases once, in a shared Addressables group | ~479 MiB (24 %) of the download, 2.8 GiB on device | Requires a rebuild of the archive from the Unity project |
-| Lower the max sprite-atlas size (8192 → 4096) or re-encode textures | potentially >1 GiB of the download | Rebuild; changes art crispness |
+| Leave the `cinematics` bundle out | ~217 MiB in the original; only 5,183,665 compressed bytes in the current ZIP because video payloads are already placeholders | One entry, but Unity's Addressables load of that group has to be handled — needs testing on device |
+| Ship the 85 duplicated atlases once, in a shared Addressables group | ~479 MiB (24 %) of the original download, 2.8 GiB on device | Requires a rebuild of the archive from the Unity project; the current archive preserves every copy and its art |
+| Lower the max sprite-atlas size (8192 → 4096) or re-encode textures | potentially >1 GiB of the original download | Rebuild; changes art crispness |
 | Re-encode the audio (AAC bitrate) | up to ~400 MiB | Rebuild; quality loss |
 | Trim audio/UI groups for a "training" playthrough | ~600 MiB | Rebuild; the game would be missing content |
 
-The first two are 700 MiB of the 1986.6 MiB — a third of the download — and
-neither is visible from the entry names alone.
+The first two are about 700 MiB of the original 1986.6 MiB — a third of that
+source download — and neither is visible from the entry names alone.
 
 ## 9. How these numbers were produced
 
-Everything was read out of the published *upstream* archive; no game files are
-committed under `web/`. The trimmed copy that §7 describes is published from
-this repository as a tag (`assets` only, never a working-tree file).
+The source archive was fetched from the pinned GitHub commit through the GitHub
+API; no game payloads are committed under `web/`. The art-preserving output is
+published as parts under the new `art-preserved-20261017` tag, with the exact
+publish commit pinned by `community-build.json` (the tag contains assets only,
+never a working-tree ZIP).
 
-1. The 100 `WebGL.zip.partN` files (2.08 GiB) come from the pinned commit; each
-   part is one blob from the GitHub API.
-2. The ZIP central directory (last 64 KB of `part100`) lists 21 entries with
-   their compressed/uncompressed sizes and offsets; each entry is inflated
-   (raw deflate) and verified against the index byte count.
-3. Each bundle is parsed as UnityFS: the header and the block/node tables are
-   **big endian** (with the 16-byte alignment before the blocks info, and the
-   `0x200` "block info padded" flag that Unity 6 sets), the serialized files
-   inside are **little endian** — header fields big endian, payloads little —
-   with the version-22 header layout (`u32` metadata size, `i64` file size,
-   `i64` data offset, one extra `i64`). Verified per file against
-   `metadata_size`/`file_size`.
-4. Only the metadata region of each node is decompressed, so a 3.2 GiB stream
-   is measured without holding it; per-class byte totals are the sums of the
-   object-table `byte_size` values, and `.resource` nodes are counted
-   separately (they are MP4/AAC and MP4 movie data — `ftyp`/`moov`/`mdat`).
-5. Duplicates are full sha256 hashes of each texture object ≥ 1 MiB.
+1. The 100 upstream `WebGL.zip.partN` blobs total 2,083,139,638 bytes. The
+   ZIP central directory lists 21 entries; every extracted bundle passed its
+   ZIP CRC check.
+2. Each bundle is parsed as UnityFS: the header and block/node tables are
+   **big endian** (including Unity 6's 16-byte alignment and `0x200` block-info
+   padding flag); serialized files inside use the version-22 layout and their
+   documented byte order.
+3. `bundle_tool.py` reads each bundle's block, node, type and object tables;
+   `treetools.py` uses UnityPy's type-tree parser and `typetree_read.py` walks
+   object fields. The rebuild streams edited bundle blocks to disk and records
+   exact before/after bytes in its stats JSON.
+4. The ZIP was rebuilt with 21 entries and verified with `zipfile.testzip()`;
+   all 111 split parts concatenate to the same SHA-256 as the complete ZIP.
+   The uncompressed UnityFS streams of four art-bearing bundles were also
+   SHA-256-compared to upstream and matched exactly.
 
-The survey scripts live in the (git-ignored) `.tmp/survey/` directory of this
-working copy: `deep_survey.py` (the bundle/object walk), `hash_textures.py`
-(duplication), `final_report.py` and `make_tables.py` (the tables above). They
-need `lz4` and a local copy of the 21 bundles; ask if you want them committed
-under `web/tools/`.
+The rebuilding dependencies are `lz4`, `xxhash` and `UnityPy`; install them
+with `pip install lz4 xxhash UnityPy`. The upstream analysis tables in §§1–5
+refer to the original source, while the pinned published rebuild's metrics are
+in §7.

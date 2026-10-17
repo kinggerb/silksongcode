@@ -39,10 +39,13 @@ assert.equal((await WebAssembly.instantiate(wasm)).instance.exports.run(), 7);
 function randomBytes(length, seed) {
   let x = seed; return Uint8Array.from({ length }, () => { x ^= x << 13; x ^= x >>> 17; x ^= x << 5; return x & 255; });
 }
-const contents = [randomBytes(210000, 123), randomBytes(800000, 789), randomBytes(150000, 456)];
-const expectedHash = crypto.createHash('sha256').update(contents[0]).digest('hex');
+const contents = [randomBytes(210000, 123), randomBytes(120000, 789), randomBytes(150000, 456)];
+const expectedHashes = contents.map(bytes => crypto.createHash('sha256').update(bytes).digest('hex'));
+const expectedHash = expectedHashes[0];
 const writer = new zip.ZipWriter(new zip.BlobWriter(), { useWebWorkers: false });
-for (let i = 0; i < contents.length; i++) await writer.add('bundle-' + i + '.bundle', new zip.Uint8ArrayReader(contents[i]));
+await writer.add('bundle-0.bundle', new zip.Uint8ArrayReader(contents[0]));
+await writer.add('unused-middle.bundle', new zip.Uint8ArrayReader(randomBytes(800000, 321)));
+for (let i = 1; i < contents.length; i++) await writer.add('bundle-' + i + '.bundle', new zip.Uint8ArrayReader(contents[i]));
 const archive = Buffer.from(await (await writer.close()).arrayBuffer()), partSize = 65536;
 const parts = [];
 for (let at = 0; at < archive.length; at += partSize) parts.push({ path: 'part-' + parts.length, bytes: Math.min(partSize, archive.length - at) });
@@ -61,10 +64,16 @@ const framework = Buffer.from(`function unityFramework(b) {
     started = true;
     (async function() {
       if (kernel.exports.run() !== 7) throw Error('Wasm fixture kernel failed');
+      var bundles = [];
+      var expectedHashes = ${JSON.stringify(expectedHashes)};
+      for (var i = 0; i < ${contents.length}; i++) {
+        var url = b.streamingAssetsUrl + '/aa/WebGL/bundle-' + i + '.bundle';
+        var bytes = await (await fetch(url)).arrayBuffer();
+        var hash = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)), function(b){return b.toString(16).padStart(2,'0');}).join('');
+        if (hash !== expectedHashes[i]) throw Error('bundle ' + i + ' bytes changed in transit');
+        bundles.push({bytes:bytes.byteLength, hash:hash});
+      }
       var url = b.streamingAssetsUrl + '/aa/WebGL/bundle-0.bundle';
-      var bytes = await (await fetch(url)).arrayBuffer();
-      var hash = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)), function(b){return b.toString(16).padStart(2,'0');}).join('');
-      if (hash !== '${expectedHash}') throw Error('bundle bytes changed in transit');
       var range = await fetch(url, {headers:{Range:'bytes=0-31'}});
       if (range.status !== 206 || (await range.arrayBuffer()).byteLength !== 32) throw Error('range response broken');
       var gl = b.canvas.getContext('webgl2');
@@ -74,7 +83,7 @@ const framework = Buffer.from(`function unityFramework(b) {
         gl.readPixels(Math.floor(b.canvas.width/2), Math.floor(b.canvas.height/2), 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
         window.__fixturePixel = [px[0], px[1], px[2], px[3]];
       }
-      window.__fixture = {bytes:bytes.byteLength, hash:hash, streaming:!!b.instantiateWasm,
+      window.__fixture = {bytes:bundles[0].bytes, hash:bundles[0].hash, bundles:bundles, streaming:!!b.instantiateWasm,
         systemWebGPU: b.SystemInfo ? b.SystemInfo.hasWebGPU : 'absent',
         matchWebGL: b.matchWebGLToCanvasSize === false && b.devicePixelRatio === 1,
         buffer: [b.canvas.width, b.canvas.height]};
@@ -160,6 +169,8 @@ try {
       error: document.getElementById('err').textContent, timings: window.SKLoading.timings(), overlayHidden: document.getElementById('screen').classList.contains('hidden') }));
     assert.equal(result.ready, true, result.error + '\n' + logs.slice(-20).join('\n'));
     assert.equal(result.overlayHidden, true); assert.equal(result.fixture.hash, expectedHash);
+    assert.equal(result.fixture.bundles.length, contents.length, 'every requested bundle was fetched from the lazy ZIP');
+    assert.deepEqual(result.fixture.bundles.map(bundle => bundle.hash), expectedHashes, 'every bundle matched its exact source bytes');
     assert.ok(result.timings.some(item => item.stage === 'first controllable gameplay'));
     // The renderer decision: this browser advertises a WebGPU adapter, and
     // the loader must neither ask for it nor point the game at WebGPU.
@@ -172,11 +183,12 @@ try {
     return { elapsedMs: Date.now() - start, result };
   }
   const boot = query => bootFor(page, query);
-  const cold = await boot();
+  const cold = await boot('?assets=lazy');
   assert.equal(cold.result.fixture.streaming, true, 'real pinned loader must use the custom native compiler');
   assert.ok(logs.some(line => line.includes('shell=1.1.2 WebGL2')), 'the boot log names the shell and the renderer');
   assert.ok(logs.some(line => line.includes('WebGL 2')), 'the verified WebGL 2 selection is logged');
-  assert.ok(transferred < archive.length / 2, 'cold boot should not download unused middle bundles');
+  assert.ok(transferred < archive.length, 'cold lazy boot should not download the full ZIP');
+  assert.ok(partRequests.length < parts.length, 'cold boot should leave unrequested ZIP parts on the host');
   assert.equal(new Set(partRequests).size, partRequests.length, 'deduplicated part requests');
   // Real WebGL pixels, sampled across several frames — the original version
   // of this test only asserted asset bytes and engine readiness, which is
@@ -200,7 +212,7 @@ try {
     await new Promise((resolve, reject) => { const r = indexedDB.open('save-sentinel', 1); r.onupgradeneeded = () => r.result.createObjectStore('saves'); r.onsuccess = () => { const tx = r.result.transaction('saves', 'readwrite'); tx.objectStore('saves').put('preserved', 'slot1'); tx.oncomplete = resolve; tx.onerror = reject; }; });
   });
   transferred = 0; partRequests = []; rawWasm = true;
-  const warm = await boot();
+  const warm = await boot('?assets=lazy');
   assert.equal(transferred, 0, 'warm load must make zero archive network requests');
   assert.equal(warm.result.fixture.streaming, true, 'native decoder must also support raw gzip .unityweb');
   assert.ok(logs.some(line => line.includes('extracted bundle cache hit')));
@@ -208,12 +220,12 @@ try {
   assert.equal(await page.evaluate(() => new Promise(resolve => { const r = indexedDB.open('save-sentinel'); r.onsuccess = () => { const tx = r.result.transaction('saves'); const get = tx.objectStore('saves').get('slot1'); get.onsuccess = () => resolve(get.result); }; })), 'preserved');
   summaries.push({ test: 'warm lazy + native raw-gzip + saved data preserved', elapsedMs: warm.elapsedMs, archiveBytesFetched: transferred });
   rawWasm = false; transferred = 0; partRequests = [];
-  const eager = await boot('?assets=eager&streaming=0');
+  const eager = await boot('?streaming=0');
   assert.equal(eager.result.fixture.streaming, false, 'stock loader path still works');
   assert.equal(transferred, archive.length, 'eager fallback fetches full archive');
   summaries.push({ test: 'eager + stock Wasm path (verified gzip guard)', elapsedMs: eager.elapsedMs, archiveBytesFetched: transferred });
   transferred = 0; partRequests = [];
-  await boot('?assets=eager&streaming=0');
+  await boot('?streaming=0');
   assert.equal(transferred, 0, 'eager warm cache is preserved too');
   const stalled = await page.evaluate(async url => {
     try { await SKStream.ensureDataset({ parts: [{ url, bytes: 4 }], cacheKey: 'stall-test', buildId: '1', expectedSize: 4,
@@ -226,7 +238,7 @@ try {
   const tabs = await Promise.all([context.newPage(), context.newPage()]);
   tabs.forEach(tab => { tab.on('pageerror', error => errors.push(error.message)); tab.on('console', message => logs.push(message.text())); });
   transferred = 0; partRequests = []; rawWasm = false;
-  await Promise.all(tabs.map(tab => bootFor(tab)));
+  await Promise.all(tabs.map(tab => bootFor(tab, '?assets=lazy')));
   assert.equal(new Set(partRequests).size, partRequests.length, 'cross-tab part downloads must deduplicate');
   summaries.push({ test: 'two simultaneous cold tabs, shared cache/pins', archiveBytesFetched: transferred, uniquePartRequests: partRequests.length });
   await Promise.all(tabs.map(tab => tab.close()));

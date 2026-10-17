@@ -12,10 +12,13 @@
     "streamingAssets": "StreamingAssets"
   },
   "assetArchive": {
-    "cacheKey": "webgl-assets-bcbe014.zip",
-    "base": "https://raw.githubusercontent.com/kinggerb/silksongcode/27e01644b547d353d997ea6b15f0e2d56ef8eb4b/parts/",
+    "cacheKey": "webgl-assets-bcbe014-art-preserved-20261017.zip",
+    "previousCacheKeys": [
+      "webgl-assets-bcbe014.zip"
+    ],
+    "base": "https://raw.githubusercontent.com/kinggerb/silksongcode/a2c4553a3e40ee536672eabb39341856e0ba35ee/parts/",
     "slim": true,
-    "total": 1252071320,
+    "total": 1847328572,
     "mime": "application/zip",
     "parts": [
       {
@@ -316,10 +319,154 @@
       },
       {
         "path": "WebGL.zip.part75",
-        "bytes": 10557336
+        "bytes": 16777216
+      },
+      {
+        "path": "WebGL.zip.part76",
+        "bytes": 16777216
+      },
+      {
+        "path": "WebGL.zip.part77",
+        "bytes": 16777216
+      },
+      {
+        "path": "WebGL.zip.part78",
+        "bytes": 16777216
+      },
+      {
+        "path": "WebGL.zip.part79",
+        "bytes": 16777216
+      },
+      {
+        "path": "WebGL.zip.part80",
+        "bytes": 16777216
+      },
+      {
+        "path": "WebGL.zip.part81",
+        "bytes": 16777216
+      },
+      {
+        "path": "WebGL.zip.part82",
+        "bytes": 16777216
+      },
+      {
+        "path": "WebGL.zip.part83",
+        "bytes": 16777216
+      },
+      {
+        "path": "WebGL.zip.part84",
+        "bytes": 16777216
+      },
+      {
+        "path": "WebGL.zip.part85",
+        "bytes": 16777216
+      },
+      {
+        "path": "WebGL.zip.part86",
+        "bytes": 16777216
+      },
+      {
+        "path": "WebGL.zip.part87",
+        "bytes": 16777216
+      },
+      {
+        "path": "WebGL.zip.part88",
+        "bytes": 16777216
+      },
+      {
+        "path": "WebGL.zip.part89",
+        "bytes": 16777216
+      },
+      {
+        "path": "WebGL.zip.part90",
+        "bytes": 16777216
+      },
+      {
+        "path": "WebGL.zip.part91",
+        "bytes": 16777216
+      },
+      {
+        "path": "WebGL.zip.part92",
+        "bytes": 16777216
+      },
+      {
+        "path": "WebGL.zip.part93",
+        "bytes": 16777216
+      },
+      {
+        "path": "WebGL.zip.part94",
+        "bytes": 16777216
+      },
+      {
+        "path": "WebGL.zip.part95",
+        "bytes": 16777216
+      },
+      {
+        "path": "WebGL.zip.part96",
+        "bytes": 16777216
+      },
+      {
+        "path": "WebGL.zip.part97",
+        "bytes": 16777216
+      },
+      {
+        "path": "WebGL.zip.part98",
+        "bytes": 16777216
+      },
+      {
+        "path": "WebGL.zip.part99",
+        "bytes": 16777216
+      },
+      {
+        "path": "WebGL.zip.part100",
+        "bytes": 16777216
+      },
+      {
+        "path": "WebGL.zip.part101",
+        "bytes": 16777216
+      },
+      {
+        "path": "WebGL.zip.part102",
+        "bytes": 16777216
+      },
+      {
+        "path": "WebGL.zip.part103",
+        "bytes": 16777216
+      },
+      {
+        "path": "WebGL.zip.part104",
+        "bytes": 16777216
+      },
+      {
+        "path": "WebGL.zip.part105",
+        "bytes": 16777216
+      },
+      {
+        "path": "WebGL.zip.part106",
+        "bytes": 16777216
+      },
+      {
+        "path": "WebGL.zip.part107",
+        "bytes": 16777216
+      },
+      {
+        "path": "WebGL.zip.part108",
+        "bytes": 16777216
+      },
+      {
+        "path": "WebGL.zip.part109",
+        "bytes": 16777216
+      },
+      {
+        "path": "WebGL.zip.part110",
+        "bytes": 16777216
+      },
+      {
+        "path": "WebGL.zip.part111",
+        "bytes": 1834812
       }
     ],
-    "mirror": "https://cdn.jsdelivr.net/gh/kinggerb/silksongcode@27e01644b547d353d997ea6b15f0e2d56ef8eb4b/parts/"
+    "mirror": "https://cdn.jsdelivr.net/gh/kinggerb/silksongcode@a2c4553a3e40ee536672eabb39341856e0ba35ee/parts/"
   },
   "fileBytes": {
     "loader": 118453,

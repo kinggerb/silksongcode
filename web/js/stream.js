@@ -780,8 +780,8 @@
    *
    * Several parts are on the wire at the same time (see DEFAULT_CONCURRENCY):
    * one part at a time spends most of the download waiting for the next
-   * round trip, and the community build is 75 parts. The parts are *not*
-   * buffered — each one is written to the sink at its own offset as its
+   * round trip, especially for a large multi-part community archive. The
+   * parts are *not* buffered — each one is written to the sink at its own offset as its
    * chunks arrive, so only the chunks that happen to be in flight are ever
    * in memory.
    */
@@ -1607,6 +1607,28 @@
       for (var name of [key + '.ok', key + '.building', key]) {
         try { await dir.removeEntry(name); } catch (e) { /* already removed */ }
       }
+    },
+    removeDatasetPrefix: async function (prefix, dirName) {
+      if (typeof prefix !== 'string' || !prefix) throw new TypeError('dataset cache prefix is required');
+      var root = await navigator.storage.getDirectory();
+      var dir;
+      try { dir = await root.getDirectoryHandle(dirName || DEFAULT_DIR, { create: false }); }
+      catch (e) { return 0; }
+      var names = [];
+      for await (var pair of dir.entries()) {
+        var name = pair[0];
+        var partMatch = name.indexOf(prefix + '.part-') === 0
+          ? /^(\d+)(?:\.(?:ok|building|probe))?$/.test(name.slice((prefix + '.part-').length))
+          : false;
+        if (name === prefix || name === prefix + '.ok' || name === prefix + '.building' ||
+            name === prefix + '.probe' || partMatch) names.push(name);
+      }
+      var removed = 0;
+      for (var i = 0; i < names.length; i++) {
+        try { await dir.removeEntry(names[i]); removed++; }
+        catch (e) { /* another tab may still hold a file; leave it for quota eviction */ }
+      }
+      return removed;
     },
     verifyFile: verifyFile,
     sha256Hex: sha256Hex,

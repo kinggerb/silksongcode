@@ -12,7 +12,7 @@
  * <base> element (the stub runs that upstream line verbatim).
  * ==========================================================================*/
 
-import { section, test, eq, ok, done } from './testkit.mjs';
+import { section, test, eq, ok, rejects, done } from './testkit.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -289,7 +289,7 @@ await test('the pinned community source enables Start and warns about its first-
   const win = bootPage({ fetchImpl });
   await new Promise((resolve) => setTimeout(resolve, 0));
   eq(win.document.getElementById('startBtn').disabled, false, 'community build can start');
-  ok(/1194\.1 MB/.test(win.document.getElementById('sub').textContent), 'first-run archive size is shown');
+  ok(/1761\.7 MB/.test(win.document.getElementById('sub').textContent), 'first-run archive size is shown');
   eq(win.SKPerf.internals().buildSource(), 'community', 'the community adapter is selected');
   ok(/cdn\.jsdelivr\.net/.test(win.SKPerf.internals().assetBase()), 'the build source uses the pinned CDN base');
   win.close();
@@ -349,8 +349,10 @@ await test('the community loader finds the <base> it was written for, and the pa
   // they only have to hand over to Unity the way they do once the archive is cached.
   win.SKStream.detect = async () => ({ opfs: true, available: 4e9, quota: 5e9, usage: 0, secure: true });
   win.SKCommunityBuild.ensureArchive = async () => ({ file: new win.Blob(['zip']), dispose() {} });
-  win.SKCommunityBuild.openArchive = async () => ({ entryCount: 1, entryFor: () => null, blobFor: async () => null, close() {} });
-  win.SKCommunityBuild.openLazyArchive = win.SKCommunityBuild.openArchive;
+  const openedModes = [];
+  const mount = { entryCount: 1, entryFor: () => null, blobFor: async () => null, close() {} };
+  win.SKCommunityBuild.openArchive = async () => { openedModes.push('eager'); return mount; };
+  win.SKCommunityBuild.openLazyArchive = async () => { openedModes.push('lazy'); return mount; };
   // jsdom does not fetch <script src>, so run the loader when the page appends it.
   const loaderUrl = source.base + source.unity.loader;
   const append = win.document.body.appendChild.bind(win.document.body);
@@ -370,6 +372,7 @@ await test('the community loader finds the <base> it was written for, and the pa
 
   eq(failure(), '', 'the start failed with');
   ok(win.unityInstance, 'Unity was started');
+  eq(openedModes.join(','), 'eager', 'the default community archive mode is eager');
   const expected = source.base + 'StreamingAssets';
   eq(win.__upstream.seen, expected, 'the loader derived StreamingAssets from the community asset root');
   eq(win.__upstream.passed, expected, 'which is the URL the page passes in the config anyway');
@@ -386,19 +389,45 @@ await test('the community loader finds the <base> it was written for, and the pa
   win.close();
 });
 
-/* Boots the page through the stubbed community loader all the way to
- * `completeUnityBoot` (the loading overlay hidden, Unity "running"), the
- * state the reported iPad failure happened in. `arm` runs inside the page
- * right before Start is clicked, so a failure can be planted that only
- * fires once the boot is under way. */
-async function bootToUnity({ arm, expectFailure = false } = {}) {
+await test('lazy archive loading requires ?assets=lazy', async () => {
   const source = JSON.parse(fs.readFileSync(path.join(WEB, 'community-build.json'), 'utf8'));
   const fetchImpl = async (url) => {
     const clean = String(url).replace(/^https?:\/\/[^/]+\//, '');
     if (clean === 'community-build.json') return { ok: true, status: 200, json: async () => source };
     return { ok: false, status: 404, headers: new Map(), text: async () => '' };
   };
-  const win = bootPage({ fetchImpl });
+  const win = bootPage({ fetchImpl, query: '?assets=lazy' });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  win.SKStream.detect = async () => ({ opfs: true, available: 4e9, quota: 5e9, usage: 0, secure: true });
+  let lazySelected = false;
+  let eagerSelected = false;
+  win.SKCommunityBuild.ensureArchive = async () => { eagerSelected = true; return { file: new win.Blob(['zip']) }; };
+  win.SKCommunityBuild.openLazyArchive = async () => {
+    lazySelected = true;
+    throw new Error('test stopped after selecting lazy archive mode');
+  };
+  win.document.getElementById('startBtn').click();
+  const error = win.document.getElementById('err');
+  for (let i = 0; i < 400 && error.classList.contains('hidden'); i++) await new Promise((resolve) => setTimeout(resolve, 5));
+  eq(lazySelected, true, '?assets=lazy selects the lazy ZIP path');
+  eq(eagerSelected, false, 'the eager download is not started for that opt-in');
+  ok(error.textContent.includes('test stopped after selecting lazy archive mode'), 'the failure is shown on the page');
+  win.close();
+});
+
+/* Boots the page through the stubbed community loader all the way to
+ * `completeUnityBoot` (the loading overlay hidden, Unity "running"), the
+ * state the reported iPad failure happened in. `arm` runs inside the page
+ * right before Start is clicked, so a failure can be planted that only
+ * fires once the boot is under way. */
+async function bootToUnity({ arm, expectFailure = false, query = '' } = {}) {
+  const source = JSON.parse(fs.readFileSync(path.join(WEB, 'community-build.json'), 'utf8'));
+  const fetchImpl = async (url) => {
+    const clean = String(url).replace(/^https?:\/\/[^/]+\//, '');
+    if (clean === 'community-build.json') return { ok: true, status: 200, json: async () => source };
+    return { ok: false, status: 404, headers: new Map(), text: async () => '' };
+  };
+  const win = bootPage({ fetchImpl, query });
   await new Promise((resolve) => setTimeout(resolve, 0));
   win.SKStream.detect = async () => ({ opfs: true, available: 4e9, quota: 5e9, usage: 0, secure: true });
   win.SKCommunityBuild.ensureArchive = async () => ({ file: new win.Blob(['zip']), dispose() {} });
@@ -438,6 +467,35 @@ function pumpFrames(win, tick = 34) {
   }
   return ran;
 }
+
+await test('a failed lazy ZIP part produces a visible bundle error', async () => {
+  const bundle = 'aa/WebGL/packed-lazy.bundle';
+  const win = await bootToUnity({
+    query: '?assets=lazy',
+    arm(next) {
+      next.SKCommunityBuild.openLazyArchive = async () => ({
+        entryCount: 1,
+        entryFor: (url) => String(url).endsWith(bundle)
+          ? ({ filename: bundle, uncompressedSize: 32, signature: 0 })
+          : null,
+        blobFor: async () => { throw new Error('HTTP 503 for WebGL.zip.part42'); },
+        close() {},
+      });
+    },
+  });
+  const message = await rejects(
+    win.fetch('https://game.example/StreamingAssets/aa/WebGL/packed-lazy.bundle'),
+    /HTTP 503/,
+    'a failed local ZIP part'
+  );
+  const overlay = win.document.getElementById('recover');
+  ok(!overlay.classList.contains('hidden'), 'the player gets an overlay instead of a silent black screen');
+  ok(win.document.getElementById('recoverMsg').textContent.includes(bundle), 'the overlay names the bundle');
+  ok(win.document.getElementById('recoverMsg').textContent.includes('HTTP 503'), 'the overlay names the failed part status');
+  ok(win.document.getElementById('logbox').textContent.includes('asset from local ZIP: ' + bundle), 'the requested bundle is logged');
+  ok(message.includes('WebGL.zip.part42'), 'the rejected fetch keeps its original part error');
+  win.close();
+});
 
 await test('a graphics frame failure surfaces in the recovery overlay instead of a silent 0 fps black screen', async () => {
   // A throwing frame callback before the game is up is only a log line —

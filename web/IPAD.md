@@ -7,14 +7,13 @@ memory ceiling.** The automated checks are in `web/package.json` (`npm test`);
 full CDN download and real iPad Safari behavior still need device testing.
 
 > **Read this first:** the repository does not contain Silksong's original
-> Unity project. The play page now uses a pinned community WebGL build source by
-> default when no prepared local build is present. Its first run downloads the
-> Addressables data into OPFS — the pinned archive is 1194.1 MB, already slimmed
-> by removing the duplicated atlases, the cutscene videos and the mesh data a 2D
-> build never draws, so the download and the file on the device are both
-> smaller; see
-> [COMMUNITY-BUILD.md](COMMUNITY-BUILD.md) for the source, storage requirements,
-> and limitations. `demo.html` remains a small loader test that does not download
+> Unity project. The play page uses a pinned community WebGL build source by
+> default when no prepared local build is present. Its first run streams the
+> art-preserving Addressables ZIP into OPFS — `1,847,328,572` bytes (about
+> `1.72 GiB`), with the original texture art preserved. Cutscene video payloads
+> are replaced and mesh payloads are zeroed; see
+> [COMMUNITY-BUILD.md](COMMUNITY-BUILD.md) for source, storage requirements and
+> limitations. `demo.html` remains a small loader test that does not download
 > or pretend to contain the game.
 
 ---
@@ -38,15 +37,16 @@ The Hollow Knight port hit precisely this wall at 926 MB.
 ## 2. What this port does instead
 
 Current loading changes, controls and validation are documented in
-[LOADING-OPTIMIZATIONS.md](LOADING-OPTIMIZATIONS.md). The default is lazy loading;
-`?assets=eager` opts back into the full-archive path.
+[LOADING-OPTIMIZATIONS.md](LOADING-OPTIMIZATIONS.md). Eager full-archive delivery
+is the default; `?assets=lazy` opts into on-demand bundle loading, which has not
+yet been verified by a complete real-game run.
 
 | Step | How | Effect |
 | --- | --- | --- |
 | Download | every chunk is streamed straight into the **Origin Private File System** through a worker (`FileSystemSyncAccessHandle`). Each in-flight ZIP part holds a 16 MiB buffer, so a phone or tablet keeps **three** requested parts in flight and a desktop keeps six (configurable 1–8, `?downloads=`) | peak RAM during download stays a few buffers, not the whole archive. `js/writer.js`, `js/stream.js` |
 | Second visit | prepared files and the community Addressables archive stay in OPFS, keyed by build id | completed data is reused; interrupted downloads resume |
-| Addressables | the community ZIP is indexed through cached on-demand parts; `zip.js` extracts only requested bundles | no 2 GB `ArrayBuffer`, and no eager unpack of every bundle |
-| The archive itself | the pinned ZIP is already slim; only parts covering requested content download before boot | unused bundles no longer block startup |
+| Addressables | by default, all pinned ZIP parts are streamed to OPFS before Unity starts; `zip.js` extracts bundles without concatenating the ZIP in RAM | no multi-gigabyte `ArrayBuffer` or eager unpack of every bundle |
+| Opt-in lazy mode | `?assets=lazy` downloads ZIP metadata and requested bundle extents on demand | can avoid waiting for unused parts, but remains opt-in until a full game boot proves coverage |
 | Cutscenes | a cutscene request is answered with a ~600-byte blank container instead of the real video (`js/community-build.js`) | a high-definition cutscene never has to fit in RAM |
 | Hand-off | a prepared build gives Unity one file-backed blob URL; the community build uses Unity's compressed CDN entry points | avoids concatenating multi-gigabyte assets in page memory |
 | Verification | prepared builds probe chunk sizes and sample digests; the community source uses pinned commit IDs, exact ZIP-part sizes and a ZIP directory check | stale or truncated files fail before Unity uses them |
@@ -72,12 +72,13 @@ prints them.
 | Disable the pinned community build fallback | `play.html?community=0` |
 
 Open the project URL in Safari on the iPad and tap **Start**. With the default
-community source, the first run streams the addressable assets to OPFS and may
-take a long time; use Wi-Fi, keep Safari in the foreground, and make sure the
-device has enough free storage. The pinned archive is already 1194.1 MB — the
-cutscenes, duplicated atlases and mesh data were already slimmed. Only requested
-parts download before boot; more may download as you play. Later runs reuse
-cached parts and extracted bundles.
+community source, eager mode streams all 111 ZIP parts (1.72 GiB) to OPFS
+before Unity starts and may take a long time; use Wi-Fi, keep Safari in the
+foreground, and make sure the device has enough free storage plus headroom for
+Unity and extracted bundles. The original texture art is preserved; cutscene
+video payloads are placeholders and mesh payloads are zeroed. `?assets=lazy`
+opts into requested-bundle delivery, but full-game coverage is not yet proven.
+Later runs reuse cached parts and extracted bundles.
 The compressed Unity entry points remain on the pinned source CDN. Add the page
 to the home screen (*Share ▸ Add to Home Screen*) if you want Safari to retain
 the origin's cache longer.
@@ -241,9 +242,9 @@ page can export, import and *install* them:
 | The tab vanishes with no message at all | That is jetsam, and it happens too fast for the page to draw. *Menu ▸ Stability* shows the heap the last session died at. |
 | Black screen after the bar | Check the log panel: `saved file is N bytes, expected M` means the download was cut; reload and it resumes. `the data check` lines say if a chunk is wrong. |
 | Black screen with `ERROR frame callback: GPUCanvasContext.configure` (or 0 fps right after boot) | The game booted but could not draw — on Retina Safaris the WebGPU path used to ask for a 9440×5872 render target on an 1180×734 screen. Shell 1.1.1 forces WebGL 2 and pins the buffer, which is the fix; check that the boot log says `shell=1.1.2 WebGL2` (a cached older page logs `1.1.1` or `1.1.0` — reload until it does). A throwing frame raises the recovery overlay. If the engine dies before any frame, the overlay says it never drew a frame; after frames are flowing, later errors only go to the log. |
-| `There is not enough free storage` | Free space in *Settings ▸ General ▸ iPad Storage*; the community ZIP alone needs about 1194.1 MB, plus headroom for extracted bundles and Unity. |
-| Loading stops with `HTTP 403 for https://cdn.jsdelivr.net/…/parts/WebGL.zip.partN` | jsDelivr refusing a GitHub *package* over its 150 MB limit — the archive is ~1.19 GB. It refuses only the parts it has not already cached, which is why the download gets a few parts in first. The descriptor serves the parts from `raw.githubusercontent.com` and keeps jsDelivr as a mirror, and a refused part is retried once against that mirror; reload and the download resumes where it stopped. See [COMMUNITY-BUILD.md](COMMUNITY-BUILD.md#two-hosts-for-the-archive-parts). |
-| Loading pauses with `GitHub is rate-limiting the download (HTTP 403) — pausing N min` | GitHub only lets a page that is not signed in download so many files an hour, and the archive is 75 of them. Nothing is lost: the page waits it out (30 s, 1 min, 2 min, 5 min, then 15 min, up to 90 minutes — `?archiveWait=<minutes>`) and carries on by itself. Keep the tab in the foreground; a reload resumes from the parts already saved. See [COMMUNITY-BUILD.md](COMMUNITY-BUILD.md#a-403-in-the-middle-of-the-download). |
+| `There is not enough free storage` | Free space in *Settings ▸ General ▸ iPad Storage*; the community ZIP alone needs about 1.72 GiB, plus headroom for extracted bundles and Unity. |
+| Loading stops with `HTTP 403 for https://cdn.jsdelivr.net/…/parts/WebGL.zip.partN` | jsDelivr refusing a GitHub *package* over its 150 MB limit — the archive is 1.72 GiB. It refuses only the parts it has not already cached, which is why the download gets a few parts in first. The descriptor serves the parts from `raw.githubusercontent.com` and keeps jsDelivr as a mirror, and a refused part is retried once against that mirror; reload and the download resumes where it stopped. See [COMMUNITY-BUILD.md](COMMUNITY-BUILD.md#two-hosts-for-the-archive-parts). |
+| Loading pauses with `GitHub is rate-limiting the download (HTTP 403) — pausing N min` | GitHub only lets a page that is not signed in download so many files an hour, and the archive has 111 parts. Nothing is lost: the page waits it out (30 s, 1 min, 2 min, 5 min, then 15 min, up to 90 minutes — `?archiveWait=<minutes>`) and carries on by itself. Keep the tab in the foreground; a reload resumes from the parts already saved. See [COMMUNITY-BUILD.md](COMMUNITY-BUILD.md#a-403-in-the-middle-of-the-download). |
 | `null is not an object (evaluating 'document.querySelector('base').href')` right after the archive finishes | The community loader asks the page for a `<base>` element (see [COMMUNITY-BUILD.md](COMMUNITY-BUILD.md#what-the-upstream-loader-expects-from-the-page)); `play.html` now provides one. Reload — the archive is cached (`cache hit:` in the log), so it goes straight to Unity, and the log shows `community loader <base>: …`. |
 | No sound | Tap the screen once — iOS wants a gesture. Then check the log for `audio guard` lines. |
 | Everything is slow | Graphics → Smooth or Low. Auto-degrade does this on its own. |
