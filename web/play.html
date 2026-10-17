@@ -57,6 +57,28 @@
   #buildMissing a{color:#c9a7ff;text-underline-offset:3px}
   #notes{font-size:11px;opacity:.7;line-height:1.6;max-width:40em}
   #notes a{color:#c9a7ff;text-underline-offset:3px}
+  /* A killed tab comes back to this screen. The report has to be readable
+     on a short landscape iPad, so the screen itself can scroll and the log
+     box scrolls on its own. */
+  #screen{overflow-y:auto;-webkit-overflow-scrolling:touch;touch-action:pan-y}
+  #crashReport{
+    width:min(92vw,640px);text-align:left;background:rgba(80,16,16,.45);
+    border:1px solid rgba(255,157,157,.5);border-radius:12px;padding:12px 14px;
+    font-size:13px;line-height:1.45;
+  }
+  #crashReport h2{
+    font-size:13px;letter-spacing:.12em;text-transform:uppercase;font-weight:600;
+    color:#ffb4b4;margin-bottom:6px;
+  }
+  #crashReport p{margin:4px 0}
+  #crashLog{
+    font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10.5px;
+    white-space:pre-wrap;word-break:break-word;max-height:9.5em;overflow:auto;
+    background:rgba(0,0,0,.45);border-radius:8px;padding:8px;margin-top:8px;
+    -webkit-user-select:text;user-select:text;touch-action:pan-y;
+  }
+  #crashReport .row{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-start;margin-top:10px}
+  #safeStartBtn{border-color:rgba(255,212,121,.75)}
   .warn{color:#ffd479}
   .err{color:#ff9d9d;white-space:pre-wrap;word-break:break-word;max-width:44em;text-align:left;font-size:12px}
   .hidden{display:none !important}
@@ -139,6 +161,18 @@
     <p><a href="BUILD.md">Build instructions</a> · <a href="demo.html">Try the loader demo</a></p>
   </div>
   <button class="main" id="startBtn" disabled>Start</button>
+  <!-- Shown only after a kill. A normal close clears the flight recorder, so
+       this stays hidden. Safe mode is a second start, not a replacement. -->
+  <div id="crashReport" class="hidden" role="status">
+    <h2>The last attempt did not finish</h2>
+    <p id="crashOutcome"></p>
+    <p id="crashPreset"></p>
+    <div id="crashLog"></div>
+    <div class="row">
+      <button type="button" class="main" id="crashCopyBtn">Copy diagnostics</button>
+      <button type="button" class="main hidden" id="safeStartBtn">Start in safe mode</button>
+    </div>
+  </div>
   <div id="notes">
     Keep this tab open and in the foreground while the game loads.<br>
     On an iPad, switching apps or letting the screen lock can make Safari kill the tab.<br>
@@ -239,12 +273,12 @@
   <div id="logbox"></div>
 </div>
 
-<script src="js/stream.js?v=1.1.1"></script>
+<script src="js/stream.js?v=1.1.2"></script>
 <script src="js/manifest.js"></script>
 <script src="js/zip-plan.js"></script>
-<script src="js/asset-cache.js?v=1.1.1"></script>
-<script src="js/community-build.js?v=1.1.1"></script>
-<script src="js/unity-startup.js?v=1.1.1"></script>
+<script src="js/asset-cache.js?v=1.1.2"></script>
+<script src="js/community-build.js?v=1.1.2"></script>
+<script src="js/unity-startup.js?v=1.1.2"></script>
 <script src="js/zip.min.js"></script>
 <script src="js/save-codec.js"></script>
 <script src="js/boss-scenes.js"></script>
@@ -266,12 +300,12 @@
 
   /* ---------------------------------------------------------------- *
    * Shell version — bumped when the page itself changes, so the log on
-   * the device says which shell is running (`shell=1.1.1 WebGL2`). The
-   * `?v=` query on the script tags below follows this number; game-data
-   * cache keys are deliberately independent of it, so upgrading the
-   * shell never invalidates downloaded assets or saves.
+   * the device says which shell is running (`shell=1.1.2 WebGL2`). The
+   * `?v=` query on the four versioned script tags and on writer.js follows
+   * this number; game-data cache keys are deliberately independent of it,
+   * so upgrading the shell never invalidates downloaded assets or saves.
    * ---------------------------------------------------------------- */
-  var SHELL_VERSION = '1.1.1';
+  var SHELL_VERSION = '1.1.2';
   // The only renderer this build is allowed to use. The pinned loader's
   // WebGPU adapter probe is removed (js/unity-startup.js), a preRun guard
   // clears the flag for any loader that could not be patched, and the
@@ -320,6 +354,14 @@
     markPlayable: function () { timing('first controllable gameplay'); },
   };
   var logLines = [];
+  var logDirty = false;
+  var cleanExitMarked = false;
+  var logRecorderStarted = false;
+  // Flight recorder. A jetsam kill takes the in-page log with the tab, so the
+  // last 80 lines are written here often enough that the next visit can show
+  // them. A normal close deletes the key (markCleanExit); only a kill leaves it.
+  var LOG_KEY = 'sk.lastlog';
+  var lastSessionLogs = null;
   function log() {
     var parts = [];
     for (var i = 0; i < arguments.length; i++) {
@@ -329,6 +371,7 @@
     var line = new Date().toISOString().substr(11, 8) + '  ' + parts.join(' ');
     logLines.push(line);
     if (logLines.length > 400) logLines.shift();
+    logDirty = true;
     if (logBox) logBox.textContent = logLines.slice(-160).join('\n');
     console.log('[ss]', parts.join(' '));
   }
@@ -336,6 +379,43 @@
     var parts = [];
     for (var i = 0; i < arguments.length; i++) parts.push(String(arguments[i]));
     log('ERROR ' + parts.join(' '));
+  }
+  function flushLog() {
+    // A clean exit wins over a flush scheduled on the same pagehide: writing
+    // the key back would make a normal close look like a kill.
+    if (cleanExitMarked) {
+      logDirty = false;
+      try { localStorage.removeItem(LOG_KEY); } catch (e) {}
+      return;
+    }
+    if (!logDirty) return;
+    try {
+      localStorage.setItem(LOG_KEY, JSON.stringify(logLines.slice(-80)));
+      logDirty = false;
+    } catch (e) {}
+  }
+  function startLogRecorder() {
+    if (logRecorderStarted) return;
+    logRecorderStarted = true;
+    setInterval(flushLog, 2500);
+    window.addEventListener('pagehide', flushLog);
+    document.addEventListener('visibilitychange', function () {
+      if (document.hidden) flushLog();
+    });
+  }
+  function consumeLastLog() {
+    var raw = null;
+    try { raw = localStorage.getItem(LOG_KEY); } catch (e) { raw = null; }
+    try { localStorage.removeItem(LOG_KEY); } catch (e2) {}
+    lastSessionLogs = null;
+    if (!raw) return null;
+    try {
+      var parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        lastSessionLogs = parsed.map(function (line) { return String(line); });
+      }
+    } catch (e3) {}
+    return lastSessionLogs;
   }
   function safeJson(o) {
     try { return JSON.stringify(o); } catch (e) { return String(o); }
@@ -1007,6 +1087,10 @@
    * ---------------------------------------------------------------- */
   var fpsSamples = { frames: 0, at: 0 };
   var lastFps = 0;
+  // Set once fpsTick has computed a real frame rate. Until then a booted
+  // game that throws is an engine that never drew, not a glitch in a running one.
+  var engineEverDrew = false;
+  function noteEngineFrame() { engineEverDrew = true; }
   var slowTicks = 0;
   var lastPerfChangeAt = 0;
   var autoCooldownUntil = 0;
@@ -1276,6 +1360,7 @@
     fpsSamples = { frames: frameCount, at: now };
     if (document.hidden) return;
     lastFps = frames > 0 ? frames * 1000 / elapsed : 0;
+    if (lastFps > 0) noteEngineFrame();
     if (!memCapTimer) {
       var text = Math.round(lastFps) + ' fps';
       if (frameInterval > 0) text += ' · cap ' + perf.fps;
@@ -1417,6 +1502,11 @@
     clearInterval(heartbeatTimer);
     if (memCapTimer) { clearInterval(memCapTimer); memCapTimer = 0; }
     writeStore(HEARTBEAT_KEY, null);
+    // Clear the flight recorder too, and refuse any flush still queued on
+    // this pagehide. A kill never gets here, which is how the report survives.
+    cleanExitMarked = true;
+    logDirty = false;
+    writeStore(LOG_KEY, null);
     // Only a session that really got the game running is allowed to clear the
     // crash streak. Safari reloads the page by itself after a kill, and that
     // fresh, never-booted page also fires pagehide — it used to wipe the
@@ -1425,6 +1515,9 @@
   }
 
   function evaluateLastSession() {
+    // FIRST: take the killed tab's log and delete the key, before the new
+    // session's recorder can overwrite it. A clean exit already removed it.
+    consumeLastLog();
     var hb = readJson(HEARTBEAT_KEY);
     writeStore(HEARTBEAT_KEY, null);      // consumed either way
     if (!hb || !hb.at) { perf.crashSteps = 0; return; }
@@ -1460,6 +1553,118 @@
   }
 
   /* ---------------------------------------------------------------- *
+   * Crash report + safe mode
+   * --------------------------------------------------------------------
+   * The in-page log dies with the tab. evaluateLastSession has already
+   * consumed sk.lastlog into lastSessionLogs. A heartbeat means the game
+   * had booted; a fresh non-hidden stage marker with no heartbeat means
+   * the tab died mid-load and never reached the game.
+   * ---------------------------------------------------------------- */
+  var crashReportStage = '';
+  function freshVisibleStage(prev) {
+    if (!prev || !prev.stage || !prev.at) return false;
+    if (Date.now() - prev.at >= 3600 * 1000) return false;
+    if (String(prev.stage).indexOf('hidden') === 0) return false;
+    return true;
+  }
+  function showCrashReport(prev) {
+    var report = $('crashReport');
+    if (!report) return;
+    crashReportStage = (prev && prev.stage) ? String(prev.stage) : '';
+    var stageOnly = !(lastSessionInfo && lastSessionInfo.crashed);
+    var outcome;
+    if (!stageOnly) {
+      var heap = lastSessionInfo.heap;
+      outcome = 'Stopped unexpectedly — heap ' +
+        (heap > 0 ? Math.round(heap) + ' MB at death' : 'not recorded at death') + '.';
+      if (crashReportStage) outcome += ' Stage: ' + crashReportStage + '.';
+    } else {
+      outcome = 'Died during "' + (crashReportStage || 'startup') +
+        '" before the game was running. It never reached the game.';
+    }
+    $('crashOutcome').textContent = outcome;
+    var starting = PRESETS[activePresetIndex()];
+    $('crashPreset').textContent = 'Starting preset: ' + starting.label +
+      ' — ' + Math.round(perf.scale * 100) + '% render, ' +
+      (perf.fps > 0 ? perf.fps + ' fps cap' : 'uncapped') + '.';
+    var recorded = lastSessionLogs || [];
+    var tail = recorded.slice(-14);
+    $('crashLog').textContent = tail.length ? tail.join('\n') : '(no log lines were saved)';
+    report.classList.remove('hidden');
+    var safeBtn = $('safeStartBtn');
+    if (safeBtn) safeBtn.classList.remove('hidden');
+    // Centered flex clips a tall report on a short iPad. Start from the top
+    // so Copy diagnostics and safe mode can be scrolled to.
+    try {
+      screenEl.style.justifyContent = 'flex-start';
+      screenEl.style.overflowY = 'auto';
+    } catch (e) {}
+    log('crash report shown' + (crashReportStage ? ' (stage ' + crashReportStage + ')' : ''));
+  }
+  function safeStartUrl() {
+    var url = new URL(location.href);
+    url.searchParams.set('preset', 'rock_bottom');
+    url.searchParams.set('fps', '24');
+    url.searchParams.set('auto', '1');
+    url.searchParams.set('downloads', '2');
+    url.searchParams.set('bundleCacheMB', '64');
+    return url.href;
+  }
+  function diagnosticsText() {
+    var info = lastSessionInfo;
+    var summary = 'none';
+    if (info) {
+      summary = (info.crashed ? 'stopped unexpectedly' : (info.hidden ? 'closed in the background' : 'ended')) +
+        (info.heap > 0 ? ', heap ' + info.heap + ' MB at death' : ', heap not recorded') +
+        ', preset ' + (info.preset || '?') +
+        ', played ' + Math.round((info.playedMs || 0) / 1000) + 's';
+    }
+    var stage = crashReportStage;
+    if (!stage) {
+      var prev = lastStage();
+      stage = (prev && prev.stage) ? prev.stage : '(none)';
+    }
+    return [
+      'shell=' + SHELL_VERSION + ' ' + SHELL_RENDERER,
+      'userAgent: ' + (navigator.userAgent || ''),
+      'last-session: ' + summary,
+      'stage: ' + stage,
+      '--- previous log ---',
+      (lastSessionLogs && lastSessionLogs.length) ? lastSessionLogs.join('\n') : '(none)',
+      '--- current log ---',
+      logLines.join('\n'),
+    ].join('\n');
+  }
+  function copyText(text) {
+    function fallback() {
+      try {
+        var area = document.createElement('textarea');
+        area.value = text;
+        area.setAttribute('readonly', 'readonly');
+        area.style.position = 'fixed';
+        area.style.left = '0';
+        area.style.top = '0';
+        area.style.opacity = '0';
+        document.body.appendChild(area);
+        area.focus();
+        area.select();
+        var copied = false;
+        try { copied = document.execCommand('copy'); } catch (e) { copied = false; }
+        document.body.removeChild(area);
+        return !!copied;
+      } catch (e2) {
+        return false;
+      }
+    }
+    try {
+      if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+        return Promise.resolve(navigator.clipboard.writeText(text)).then(function () { return true; }, fallback);
+      }
+    } catch (e3) {}
+    return Promise.resolve(fallback());
+  }
+
+  /* ---------------------------------------------------------------- *
    * Recovery overlay: lost graphics context or a frozen game
    * ---------------------------------------------------------------- */
   var recoverEl = $('recover'), recoverMsg = $('recoverMsg');
@@ -1471,6 +1676,31 @@
     recoverMsg.textContent = message;
     recoverEl.classList.remove('hidden');
     logError('recovery: ' + message);
+  }
+  // An abort, a script error or an unhandled rejection before the first
+  // measured frame means the engine died during startup. Once frames are
+  // flowing the same errors only go to the log — never cover a running game.
+  function surfaceEngineFailure(msg) {
+    var text = msg == null ? '' : String(msg);
+    logError('engine: ' + text);
+    if (booted && !engineEverDrew) {
+      showRecover('The engine failed while starting and never drew a frame. ' + text);
+    }
+  }
+  function installEngineFailureSurface() {
+    window.addEventListener('error', function (ev) {
+      // A resource error (image, stylesheet) has a target element and no
+      // message. Those are not the engine dying; a real exception always
+      // carries a message or an Error.
+      if (ev && ev.target && ev.target !== window && !ev.message && !ev.error) return;
+      var message = (ev && (ev.message || (ev.error && ev.error.message))) || 'script error';
+      surfaceEngineFailure(message);
+    }, true);
+    window.addEventListener('unhandledrejection', function (ev) {
+      var reason = ev && ev.reason;
+      var message = (reason && (reason.message || String(reason))) || 'unhandled rejection';
+      surfaceEngineFailure(message);
+    });
   }
   $('recoverBtn').addEventListener('click', function () { markCleanExit(); location.reload(); });
   $('recoverWait').addEventListener('click', function () {
@@ -1596,8 +1826,18 @@
         buildSource: function () { return BUILD_SOURCE; },
         perfDescription: perfDescription,
         frameInterval: function () { return frameInterval; },
+        downloadConcurrency: downloadConcurrency,
+        safeStartUrl: safeStartUrl,
+        surfaceEngineFailure: surfaceEngineFailure,
+        noteEngineFrame: noteEngineFrame,
+        verifyPayloadMagics: verifyPayloadMagics,
+        flushLog: flushLog,
+        log: log,
+        diagnosticsText: diagnosticsText,
+        lastSessionLogs: function () { return lastSessionLogs; },
+        engineEverDrew: function () { return engineEverDrew; },
         resetStores: function () {
-          [PERF_KEY, HEARTBEAT_KEY, STREAK_KEY, CRASH_HEAP_KEY].forEach(function (key) { writeStore(key, null); });
+          [PERF_KEY, HEARTBEAT_KEY, STREAK_KEY, CRASH_HEAP_KEY, LOG_KEY].forEach(function (key) { writeStore(key, null); });
           perf.preset = defaultPresetIndex();
           perf.crashSteps = 0;
           perf.scale = PRESETS[perf.preset].scale;
@@ -1767,6 +2007,18 @@
   function isSmallDevice() {
     return isTouch() || isMobileBrowser();
   }
+  // Each in-flight ZIP part holds a 16 MiB buffer. Six of them is 96 MiB on
+  // top of the compiled-in ~2 GiB heap — the working theory for the kill that
+  // still happens once WebGL 2 actually boots. A phone or tablet keeps three
+  // in flight; a desktop keeps six. ?downloads= still overrides (1–8).
+  function downloadConcurrency() {
+    var raw = params.get('downloads');
+    if (raw != null && String(raw) !== '') {
+      var n = Number(raw);
+      if (isFinite(n) && n > 0) return Math.max(1, Math.min(n, 8));
+    }
+    return isSmallDevice() ? 3 : 6;
+  }
 
   $('menuBtn').addEventListener('click', async function () {
     panelEl.classList.toggle('hidden');
@@ -1837,14 +2089,20 @@
     toast(okDone ? 'Cached game data deleted — reload and it will download again' : 'Nothing to delete');
     refreshStoreRows();
   });
-  $('copyBtn').addEventListener('click', async function () {
-    var text = logLines.join('\n');
-    try {
-      await navigator.clipboard.writeText(text);
-      toast('Diagnostics copied');
-    } catch (e) {
-      toast('Clipboard blocked — open the console instead');
-    }
+  $('copyBtn').addEventListener('click', function () {
+    copyText(diagnosticsText()).then(function (ok) {
+      toast(ok ? 'Diagnostics copied' : 'Clipboard blocked — open the console instead');
+    });
+  });
+  $('crashCopyBtn').addEventListener('click', function () {
+    copyText(diagnosticsText()).then(function (ok) {
+      toast(ok ? 'Diagnostics copied' : 'Clipboard blocked — the report is still on screen');
+    });
+  });
+  $('safeStartBtn').addEventListener('click', function () {
+    var url = safeStartUrl();
+    log('safe mode: ' + url);
+    try { location.href = url; } catch (e) { logError('safe mode navigation failed: ' + ((e && e.message) || e)); }
   });
   $('reloadBtn').addEventListener('click', function () { location.reload(); });
   $('exportBtn').addEventListener('click', function () { exportSave(); });
@@ -2426,6 +2684,184 @@
    * ---------------------------------------------------------------- */
   var booted = false, bootedAt = 0, currentStage = 'idle', unityInstance = null;
 
+  /* ---------------------------------------------------------------- *
+   * Payload magic check
+   * --------------------------------------------------------------------
+   * Answers "nothing important actually loads". Before Unity starts, read
+   * the first bytes of the data and wasm it is about to fetch. fetch decodes
+   * Content-Encoding: gzip transparently, so a content-coded response yields
+   * the real magic here. The pinned .unityweb files are *themselves* gzip
+   * (1f 8b, inner bytes UnityWebData1.0\\0 and 00 61 73 6d — checked against
+   * the pinned commit). When the server does not set Content-Encoding, the
+   * first bytes are that container; a few KB are inflated and the inner
+   * magic is what must match. A captive-portal HTML page matches neither,
+   * which is the corrupt-cache case. The probe never downloads the file:
+   * a Range request, then cancel after a small prefix.
+   * ---------------------------------------------------------------- */
+  var UNITY_DATA_MAGIC = (function () {
+    var text = 'UnityWebData1.0\0';
+    var out = [];
+    for (var i = 0; i < text.length; i++) out.push(text.charCodeAt(i));
+    return out;
+  })();
+  var WASM_MAGIC = [0x00, 0x61, 0x73, 0x6d];
+
+  function magicEquals(bytes, magic) {
+    if (!bytes || bytes.length < magic.length) return false;
+    for (var i = 0; i < magic.length; i++) if ((bytes[i] & 255) !== magic[i]) return false;
+    return true;
+  }
+  function isGzipMagic(bytes) {
+    return !!(bytes && bytes.length >= 2 && (bytes[0] & 255) === 0x1f && (bytes[1] & 255) === 0x8b);
+  }
+  function describeHead(bytes) {
+    if (!bytes || !bytes.length) return '(empty)';
+    var hex = [];
+    var ascii = '';
+    var n = Math.min(bytes.length, 16);
+    for (var i = 0; i < n; i++) {
+      var b = bytes[i] & 255;
+      hex.push((b < 16 ? '0' : '') + b.toString(16));
+      ascii += (b >= 32 && b < 127) ? String.fromCharCode(b) : '.';
+    }
+    return ascii + ' [' + hex.join(' ') + ']';
+  }
+  function concatLimited(chunks, maxBytes) {
+    var total = 0;
+    for (var i = 0; i < chunks.length; i++) total += chunks[i].length;
+    var out = new Uint8Array(Math.min(maxBytes, total));
+    var at = 0;
+    for (var j = 0; j < chunks.length && at < out.length; j++) {
+      var n = Math.min(chunks[j].length, out.length - at);
+      out.set(chunks[j].subarray(0, n), at);
+      at += n;
+    }
+    return at === out.length ? out : out.subarray(0, at);
+  }
+  function responseUsable(response) {
+    if (!response) return false;
+    if (response.status === 206 || response.ok) return true;
+    return response.status >= 200 && response.status < 300;
+  }
+  async function readLimitedBody(response, maxBytes) {
+    if (response.body && typeof response.body.getReader === 'function') {
+      var reader = response.body.getReader();
+      var chunks = [];
+      var got = 0;
+      try {
+        while (got < maxBytes) {
+          var step = await reader.read();
+          if (step.done) break;
+          if (step.value && step.value.length) {
+            chunks.push(step.value);
+            got += step.value.length;
+          }
+        }
+      } finally {
+        try { await reader.cancel(); } catch (e) {}
+      }
+      return concatLimited(chunks, maxBytes);
+    }
+    if (typeof response.arrayBuffer === 'function') {
+      var raw = await response.arrayBuffer();
+      var bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
+      return bytes.subarray(0, maxBytes);
+    }
+    throw new Error('no body');
+  }
+  async function fetchPrefix(url, bytes) {
+    var response = await window.fetch(url, { headers: { Range: 'bytes=0-' + (bytes - 1) } });
+    if (!responseUsable(response)) throw new Error('HTTP ' + ((response && response.status) || 'no response'));
+    return readLimitedBody(response, bytes);
+  }
+  function gzipSource(compressed) {
+    // iPad Safari has Blob.stream(). A ReadableStream of the same bytes is the
+    // fallback (and what the jsdom suite uses); either way only this prefix
+    // is inflated, never the file.
+    if (typeof Blob === 'function' && typeof Blob.prototype.stream === 'function') {
+      return new Blob([compressed]).stream();
+    }
+    if (typeof ReadableStream === 'function') {
+      return new ReadableStream({
+        start: function (controller) {
+          controller.enqueue(compressed);
+          controller.close();
+        },
+      });
+    }
+    return null;
+  }
+  async function inflateGzipPrefix(compressed, need) {
+    var Inflate = typeof DecompressionStream === 'function' ? DecompressionStream : null;
+    if (!Inflate) return null;
+    var source = gzipSource(compressed);
+    if (!source || typeof source.pipeThrough !== 'function') return null;
+    var reader = null;
+    try {
+      var stream = source.pipeThrough(new Inflate('gzip'));
+      reader = stream.getReader();
+      var chunks = [];
+      var got = 0;
+      while (got < need) {
+        var step;
+        try { step = await reader.read(); } catch (e) { break; }
+        if (!step || step.done) break;
+        if (step.value && step.value.length) {
+          chunks.push(step.value);
+          got += step.value.length;
+        }
+      }
+      return chunks.length ? concatLimited(chunks, need) : null;
+    } catch (e2) {
+      return null;
+    } finally {
+      if (reader) { try { await reader.cancel(); } catch (e3) {} }
+    }
+  }
+  async function inspectPayload(url, expected) {
+    var head = await fetchPrefix(url, 16);
+    if (magicEquals(head, expected)) return { ok: true, head: head };
+    // Pinned .unityweb: gzip container, fetch did not unwrap it. Inflate a
+    // few KB — never the file — and check the inner magic.
+    if (isGzipMagic(head)) {
+      var compressed = await fetchPrefix(url, 4096);
+      var inner = await inflateGzipPrefix(compressed, expected.length);
+      if (inner && magicEquals(inner, expected)) return { ok: true, head: inner, gzip: true };
+      if (!inner) return { ok: false, head: head, gzip: true, inconclusive: true };
+      return { ok: false, head: inner, gzip: true };
+    }
+    return { ok: false, head: head };
+  }
+  async function verifyPayloadMagics(dataUrl, wasmUrl) {
+    var dataResult;
+    var wasmResult;
+    try {
+      dataResult = await inspectPayload(dataUrl, UNITY_DATA_MAGIC);
+      wasmResult = await inspectPayload(wasmUrl, WASM_MAGIC);
+    } catch (e) {
+      logError('payload check: could not read the first bytes (' + ((e && e.message) || e) + ')');
+      return false;
+    }
+    function report(label, expectedName, result) {
+      if (result.ok) return;
+      if (result.inconclusive) {
+        log('payload check: ' + label + ' is a gzip .unityweb container (head: ' + describeHead(result.head) +
+          '); this browser did not inflate the prefix, so the inner magic was not confirmed');
+        return;
+      }
+      logError('payload check: ' + label + ' does not look like ' + expectedName + ' (head: ' + describeHead(result.head) +
+        ') — the cached copy is wrong; reload, and if it persists clear this site\'s website data');
+    }
+    report('game data', 'UnityWebData1.0', dataResult);
+    report('wasm', 'a WebAssembly module', wasmResult);
+    if (dataResult.ok && wasmResult.ok) {
+      var via = (dataResult.gzip || wasmResult.gzip) ? ' (inner magic of the gzip .unityweb container)' : '';
+      log('payload check: UnityWebData1.0 and wasm 00 61 73 6d — the real game data reached Unity' + via);
+      return true;
+    }
+    return false;
+  }
+
   function makeUnityConfig(dataUrl, codeUrl, frameworkUrl, streamingAssetsUrl) {
     return {
       dataUrl: dataUrl,
@@ -2494,7 +2930,7 @@
       postMainLoop: function () { noteFrame(nowMs()); },
       print: function (t) { log(t); },
       printErr: function (t) { log('warn ' + t); },
-      onAbort: function (what) { logError('unity abort: ' + what); },
+      onAbort: function (what) { surfaceEngineFailure(what == null ? 'unity abort' : String(what)); },
     };
   }
 
@@ -2544,6 +2980,12 @@
     if (heap) log('game memory: ' + heap + ' MB of wasm heap');
     toast('Tap the screen once so sound can start', 5000);
     canvas.focus && canvas.focus();
+    // The pinned framework's Browser.updateCanvasDimensions strips the canvas
+    // element's inline width/height during takeover. Put the display size back
+    // after that. These timers call setCanvasCss only — never canvas.width or
+    // canvas.height, because that assignment clears the WebGL frame.
+    setTimeout(function () { try { setCanvasCss(); } catch (e) {} }, 1000);
+    setTimeout(function () { try { setCanvasCss(); } catch (e) {} }, 5000);
     setTimeout(function () {
       try { if (dataSet && dataSet.dispose) dataSet.dispose(); } catch (e) {}
       try { if (wasmSet && wasmSet.dispose) wasmSet.dispose(); } catch (e) {}
@@ -2627,7 +3069,7 @@
           // A cached copy is checked with sampled digests (a few MB of hashing,
           // instant on iPad); "?verify=full" hashes the whole file instead.
           verify: params.get('verify') === 'full' ? 'full' : (spec.integrity ? 'sample' : 'size'),
-          workerUrl: 'js/writer.js?v=1.1.1',
+          workerUrl: 'js/writer.js?v=' + SHELL_VERSION,
           fetchImpl: SKCommunityBuild.timedFetch(window.fetch.bind(window), 30000),
           stallTimeoutMs: 45000,
           signal: controller ? controller.signal : undefined,
@@ -2736,9 +3178,11 @@
         // the community CDN), so the archive may name its root itself. A mirror
         // can be forced with ?archiveBase=<url> — see web/COMMUNITY-BUILD.md.
         base: params.get('archiveBase') || (source.assetArchive && source.assetArchive.base) || ASSET_BASE,
-        workerUrl: 'js/writer.js?v=1.1.1',
-        concurrency: Math.max(1, Math.min(Number(params.get('downloads')) || 6, 8)),
+        workerUrl: 'js/writer.js?v=' + SHELL_VERSION,
+        concurrency: downloadConcurrency(),
         stallTimeoutMs: 45000,
+        // 512 MB is an OPFS disk budget for extracted bundles, not RAM. Safe
+        // mode can lower it with ?bundleCacheMB=; the default stays.
         bundleCacheBytes: Math.max(0, Math.min(params.has('bundleCacheMB') ? Number(params.get('bundleCacheMB')) || 0 : 512, 1024)) * 1048576,
         bundleBase: params.get('bundleBase') || source.assetArchive.bundleBase || '',
         stream: SKStream,
@@ -2822,6 +3266,7 @@
       var streamingAssetsUrl = abs(source.unity.streamingAssets);
       var config = makeUnityConfig(dataUrl, wasmUrl, frameworkUrl, streamingAssetsUrl);
       provideUpstreamBase(ASSET_BASE);
+      await verifyPayloadMagics(dataUrl, wasmUrl);
       var instance = await instantiateUnity(abs(source.unity.loader), config, await startup);
       completeUnityBoot(instance, null, null);
     } finally {
@@ -2928,6 +3373,7 @@
         BUILD.unity.frameworkUrl,
         BUILD.unity.streamingAssetsUrl
       );
+      await verifyPayloadMagics(dataSet.url, wasmSet.url);
       var instance = await instantiateUnity(abs(BUILD.unity.loader), config);
 
       /* --- 5. done --- */
@@ -3002,8 +3448,10 @@
     // Before anything can create a media element or an audio context: the
     // Unity framework loads later and its first play() must already be guarded.
     installAudioGuards();
+    installEngineFailureSurface();
     loadPerf();
     evaluateLastSession();
+    startLogRecorder();
     installFrameLimiter();
     setFrameInterval();
     applyResolution();
@@ -3026,12 +3474,16 @@
         PRESETS[activePresetIndex()].label + ' to use less memory. Menu ▸ Graphics to change.', 9000);
     }
     var prev = lastStage();
-    if (prev && prev.stage) {
+    var stageFresh = freshVisibleStage(prev);
+    if (stageFresh) {
       var age = Math.round((Date.now() - prev.at) / 1000);
-      if (age < 3600 && String(prev.stage).indexOf('hidden') !== 0) {
-        log('previous attempt ended during: ' + prev.stage + ' (' + age + 's ago)');
-        toast('Previous attempt stopped during "' + prev.stage + '"', 6000);
-      }
+      log('previous attempt ended during: ' + prev.stage + ' (' + age + 's ago)');
+      toast('Previous attempt stopped during "' + prev.stage + '"', 6000);
+    }
+    // After the toasts: a killed session, or a mid-load death that never wrote
+    // a heartbeat, both leave a report the reload can still show.
+    if ((lastSessionInfo && lastSessionInfo.crashed) || stageFresh) {
+      showCrashReport(prev);
     }
 
     SKStream.detect().then(function (c) {

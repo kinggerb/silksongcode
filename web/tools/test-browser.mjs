@@ -174,7 +174,7 @@ try {
   const boot = query => bootFor(page, query);
   const cold = await boot();
   assert.equal(cold.result.fixture.streaming, true, 'real pinned loader must use the custom native compiler');
-  assert.ok(logs.some(line => line.includes('shell=1.1.1 WebGL2')), 'the boot log names the shell and the renderer');
+  assert.ok(logs.some(line => line.includes('shell=1.1.2 WebGL2')), 'the boot log names the shell and the renderer');
   assert.ok(logs.some(line => line.includes('WebGL 2')), 'the verified WebGL 2 selection is logged');
   assert.ok(transferred < archive.length / 2, 'cold boot should not download unused middle bundles');
   assert.equal(new Set(partRequests).size, partRequests.length, 'deduplicated part requests');

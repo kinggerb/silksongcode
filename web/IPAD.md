@@ -43,7 +43,7 @@ Current loading changes, controls and validation are documented in
 
 | Step | How | Effect |
 | --- | --- | --- |
-| Download | every chunk is streamed straight into the **Origin Private File System** through a worker (`FileSystemSyncAccessHandle`), up to six requested archive parts in flight (configurable 1–8) | peak RAM during download: a few MB, not GB. `js/writer.js`, `js/stream.js` |
+| Download | every chunk is streamed straight into the **Origin Private File System** through a worker (`FileSystemSyncAccessHandle`). Each in-flight ZIP part holds a 16 MiB buffer, so a phone or tablet keeps **three** requested parts in flight and a desktop keeps six (configurable 1–8, `?downloads=`) | peak RAM during download stays a few buffers, not the whole archive. `js/writer.js`, `js/stream.js` |
 | Second visit | prepared files and the community Addressables archive stay in OPFS, keyed by build id | completed data is reused; interrupted downloads resume |
 | Addressables | the community ZIP is indexed through cached on-demand parts; `zip.js` extracts only requested bundles | no 2 GB `ArrayBuffer`, and no eager unpack of every bundle |
 | The archive itself | the pinned ZIP is already slim; only parts covering requested content download before boot | unused bundles no longer block startup |
@@ -101,8 +101,10 @@ and Unity's stream compilation.
   down to **Rock bottom** (25 % scale, 24 fps).
 * **Storage** — the cache lives in the origin's private file system; *Menu ▸
   Clear cached game data* deletes it.
-* **Crashes** — a killed tab leaves a heartbeat behind, so the next visit shows
-  *last crash at x MB heap* and starts one level lower on its own.
+* **Crashes** — a killed tab leaves a heartbeat and a flight recorder behind.
+  The next visit shows a crash report on the start screen (heap at death,
+  stage, the last log lines) and offers **Start in safe mode**. See
+  [When the tab dies](#when-the-tab-dies-the-crash-report-and-safe-mode).
 
 ## 5. Graphics & performance
 
@@ -181,7 +183,9 @@ for a 1180×734 screen` and a black screen at 0 fps. The SHA-verified loader
 patch removes that probe (no adapter request at all, `SystemInfo.hasWebGPU`
 forced false before the framework picks a renderer), and a `preRun` guard
 clears the flag again for any loader that could not be patched. The boot log
-says which shell and renderer you got: `shell=1.1.1 WebGL2`.
+says which shell and renderer you got: `shell=1.1.2 WebGL2`. Shell 1.1.1 is
+the release that forced WebGL 2; 1.1.2 adds the crash report. A cached older
+page still logs `1.1.1` or `1.1.0` — reload until it does not.
 
 The canvas is also owned strictly: the render scale writes the *backing
 store* directly (`devicePixelRatio: 1`, `matchWebGLToCanvasSize: false`, no
@@ -230,11 +234,13 @@ page can export, import and *install* them:
 
 | Symptom | What to try |
 | --- | --- |
+| Tab crashes and Safari reloads it | The start screen keeps a crash report: outcome, **heap … MB at death** when a heartbeat was written, the stage, and the last log lines. Tap **Copy diagnostics** and keep that text. Close every other Safari tab and every other app, then try **Start in safe mode** once. A title screen only in safe mode means memory pressure (jetsam), not a missing download. Do not clear saves, and do not clear website data for this — that throws away the cached archive. |
+| Loading completes but nothing appears | Open Menu ▸ Log, or the crash report, and find the two `payload check:` lines. They must say the real game data reached Unity. If a line says the file **does not look like** Unity data or wasm and shows a `head:` that is HTML, the cached copy is wrong — reload, and if it persists clear this site's website data and let it download again. That is a cache problem, not a graphics setting. A jetsam kill does not look like that. |
 | Tab disappears while playing | Graphics → Low, then Potato, then Minimum. Close other tabs. The next start already begins lower after a crash. |
 | Tab disappears during "Loading into memory" | Retry (the data is cached, so it skips the download) and lower the render scale. |
 | The tab vanishes with no message at all | That is jetsam, and it happens too fast for the page to draw. *Menu ▸ Stability* shows the heap the last session died at. |
 | Black screen after the bar | Check the log panel: `saved file is N bytes, expected M` means the download was cut; reload and it resumes. `the data check` lines say if a chunk is wrong. |
-| Black screen with `ERROR frame callback: GPUCanvasContext.configure` (or 0 fps right after boot) | The game booted but could not draw — on Retina Safaris the WebGPU path used to ask for a 9440×5872 render target on an 1180×734 screen. Shell 1.1.1 forces WebGL 2 and pins the buffer, which is the fix; check that the boot log says `shell=1.1.1 WebGL2` (a cached older page logs `1.1.0` — reload until it does). A throwing frame now raises the recovery overlay instead of failing silently. |
+| Black screen with `ERROR frame callback: GPUCanvasContext.configure` (or 0 fps right after boot) | The game booted but could not draw — on Retina Safaris the WebGPU path used to ask for a 9440×5872 render target on an 1180×734 screen. Shell 1.1.1 forces WebGL 2 and pins the buffer, which is the fix; check that the boot log says `shell=1.1.2 WebGL2` (a cached older page logs `1.1.1` or `1.1.0` — reload until it does). A throwing frame raises the recovery overlay. If the engine dies before any frame, the overlay says it never drew a frame; after frames are flowing, later errors only go to the log. |
 | `There is not enough free storage` | Free space in *Settings ▸ General ▸ iPad Storage*; the community ZIP alone needs about 1194.1 MB, plus headroom for extracted bundles and Unity. |
 | Loading stops with `HTTP 403 for https://cdn.jsdelivr.net/…/parts/WebGL.zip.partN` | jsDelivr refusing a GitHub *package* over its 150 MB limit — the archive is ~1.19 GB. It refuses only the parts it has not already cached, which is why the download gets a few parts in first. The descriptor serves the parts from `raw.githubusercontent.com` and keeps jsDelivr as a mirror, and a refused part is retried once against that mirror; reload and the download resumes where it stopped. See [COMMUNITY-BUILD.md](COMMUNITY-BUILD.md#two-hosts-for-the-archive-parts). |
 | Loading pauses with `GitHub is rate-limiting the download (HTTP 403) — pausing N min` | GitHub only lets a page that is not signed in download so many files an hour, and the archive is 75 of them. Nothing is lost: the page waits it out (30 s, 1 min, 2 min, 5 min, then 15 min, up to 90 minutes — `?archiveWait=<minutes>`) and carries on by itself. Keep the tab in the foreground; a reload resumes from the parts already saved. See [COMMUNITY-BUILD.md](COMMUNITY-BUILD.md#a-403-in-the-middle-of-the-download). |
@@ -243,7 +249,45 @@ page can export, import and *install* them:
 | Everything is slow | Graphics → Smooth or Low. Auto-degrade does this on its own. |
 | Boss saves missing in the menu | `node web/tools/stage-boss-scenes.mjs` (the roster is not committed twice). |
 
-*Menu ▸ Copy diagnostics* puts the whole log on the clipboard.
+*Menu ▸ Copy diagnostics* and the crash report's **Copy diagnostics** put the
+shell version, user agent, last-session summary, stage, previous log and
+current log on the clipboard.
+
+### When the tab dies: the crash report and safe mode
+
+iPadOS can jetsam-kill the tab with no error, and Safari then reloads it.
+The in-page log dies with the tab, which is why a black screen followed by
+a reload used to leave nothing to read. Shell 1.1.2 keeps a flight recorder
+(`sk.lastlog`, the last 80 lines, flushed every 2.5 seconds and when the tab
+is hidden). A normal close clears that recorder. Only a real kill leaves it,
+and the next visit shows it on the start screen.
+
+The report has:
+
+* what happened, and the wasm **heap … MB at death** when a heartbeat was
+  written (the game had booted and was allocating);
+* **It never reached the game.** when the tab died mid-load — a stage marker,
+  no heartbeat. That is a load-time kill, not a failure inside a running game;
+* the graphics preset the next start will use;
+* the last 14 recorded log lines;
+* **Copy diagnostics** — shell version, user agent, last-session summary,
+  stage, previous log and current log;
+* **Start in safe mode**, which reloads this same page with
+  `preset=rock_bottom&fps=24&auto=1&downloads=2&bundleCacheMB=64`.
+
+Safe mode is a lower-memory start, not a cache clear. It does not delete
+saves or downloaded game data. A phone or tablet already keeps 3 ZIP parts
+in flight instead of 6 (each part holds a 16 MiB buffer); safe mode drops
+that to 2 and uses the lowest graphics preset. The 512 MB extracted-bundle
+budget is disk in OPFS, not RAM, and is left at 512 unless safe mode asks
+for 64. If the title screen appears only in safe mode, the kill was memory
+pressure. The heap figure and the stage are what separate that from an
+engine failure.
+
+The boot log must show `shell=1.1.2 WebGL2`. Gameplay is not established
+until that log is the new shell, FPS is non-zero, and the title screen is
+actually visible. The compiled-in ~2 GiB wasm heap is unchanged — no page
+setting shrinks it, and this shell does not patch the wasm allocator.
 
 ## 9. Working on it
 

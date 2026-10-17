@@ -23,8 +23,9 @@ game data/framework and a small real Wasm module; it is not a full-game test.
   unjournaled partial files are rebuilt; valid completed caches are preserved.
 - **Lazy split-ZIP reader**: ZIP metadata and only parts covering a requested
   bundle are downloaded into OPFS. Requested bundle extents prefetch with up
-  to six active downloads, configurable between one and eight. There is no
-  automatic whole-game prefetch competing with startup.
+  to six active downloads on a desktop and three on a phone or tablet
+  (each in-flight part holds a 16 MiB buffer), configurable between one and
+  eight. There is no automatic whole-game prefetch competing with startup.
 - **Existing complete ZIP reuse**, without copying it into the new part cache.
   Corrupt legacy indexes/bundles invalidate that cache and recover through lazy
   parts instead of getting stuck on a bad old completion marker.
@@ -70,7 +71,7 @@ clear saves.
 | --- | --- |
 | `?assets=eager` | Original full-ZIP-before-boot path, now with cache/resume fixes |
 | `?streaming=0` | Stock buffered Wasm path; verified gzip guard still applies |
-| `?downloads=4` | Limit lazy part downloads (1–8; default 6) |
+| `?downloads=4` | Limit lazy part downloads (1–8; default 3 on a phone/tablet, 6 on a desktop) |
 | `?bundleCacheMB=0` | Disable optional extracted-bundle disk cache |
 | `?bundleCacheMB=256` | Set extracted cache budget (0–1024 MiB) |
 | `?archiveBase=https://host/version/` | Byte-identical ZIP parts on another host |
@@ -220,6 +221,77 @@ The test uses a public GitHub API request for the exact pinned loader, or set
 `PINNED_LOADER_PATH=/path/to/w-pt.loader.js` for an offline copy; its digest is
 always checked. `CHROMIUM_MODULE` optionally points to an installed
 `@sparticuz/chromium` module. Browser binaries/system libraries are not committed.
+
+## Follow-up (shell 1.1.2): flight recorder, crash report, safe mode
+
+After shell 1.1.1 the affected iPad still never showed the title screen: a
+black screen, then the tab crashed and Safari reloaded it. A warm cache made
+loading look instant, and the in-page log died with the tab, so there was
+nothing to read. With WebGL 2 actually working, the working theory — code-level
+support, not a device measurement — is that the game now boots and allocates,
+and iPadOS jetsam-kills the tab mid-load. Each in-flight ZIP part holds a
+16 MiB buffer; the old default kept 6 of them (96 MiB) on top of the
+compiled-in ~2 GiB wasm heap, which no HTML setting can shrink and which this
+shell does not patch.
+
+Shell 1.1.2 does **not** claim that gameplay works. It makes the next kill
+diagnosable and offers a lower-memory start:
+
+- a flight recorder (`sk.lastlog`) flushed every 2.5 s and when the tab is
+  hidden, consumed on the next visit and cleared on a clean `pagehide`, so
+  only a real kill leaves a report;
+- a start-screen crash report: outcome, heap at death, "It never reached the
+  game." for stage-only deaths, the starting preset, the last 14 log lines,
+  and Copy diagnostics (shell version, user agent, last-session summary,
+  stage, previous log, current log);
+- **Start in safe mode**
+  (`preset=rock_bottom&fps=24&auto=1&downloads=2&bundleCacheMB=64`), which
+  does not clear saves or the game-data cache;
+- small devices keep 3 part downloads in flight by default, desktops 6
+  (`?downloads=` still overrides, 1–8). The 512 MB extracted-bundle budget is
+  OPFS disk, not RAM, and is unchanged except when safe mode asks for 64;
+- post-boot reassertion of canvas CSS (`width`/`height` 100%, `transform:
+  none`) at 1 s and 5 s, because the pinned framework's
+  `Browser.updateCanvasDimensions` strips inline canvas CSS during takeover.
+  Those timers never write `canvas.width`/`height`;
+- engine failures (`onAbort`, window `error` capture, `unhandledrejection`)
+  raise the recovery overlay only when the game has booted and never drawn a
+  frame. After frames flow, errors only log;
+- a payload magic check before Unity starts, on both boot paths. The first
+  16 bytes are fetched with a Range header; fetch decodes `Content-Encoding:
+  gzip` transparently. The pinned `.unityweb` files are themselves gzip
+  (`1f 8b`); their inner bytes are `UnityWebData1.0\0` and wasm
+  `00 61 73 6d` (confirmed against commit `bcbe014` by inflating a prefix,
+  not the file). A container is inflated from a few KB, never downloaded
+  whole for the check. The log says whether the real game data reached
+  Unity, or the cached copy does not look like game data (captive-portal
+  HTML is the mismatch). A jetsam kill is not treated as a corrupt cache,
+  and nothing here clears saves or game-data cache keys;
+- shell scripts versioned as `?v=1.1.2`, boot log `shell=1.1.2 WebGL2`.
+  Game-data cache keys, saves and downloaded assets are not invalidated.
+
+Already confirmed against the pinned framework, and not re-litigated here:
+the framework pushes onto `Module.preRun` (the WebGL 2 guard survives),
+`_JS_SystemInfo_HasWebGPU` returns `Module.SystemInfo.hasWebGPU` directly,
+`GetMatchWebGLToCanvasSize` / `GetPreferredDevicePixelRatio` honour
+`matchWebGLToCanvasSize: false` (ratio 1), and
+`Browser.updateCanvasDimensions` strips inline canvas CSS. The old
+9440×5872 target was the old `scale(4)` CSS transform times devicePixelRatio
+2 on an 1180×734 screen.
+
+Validation: **198 tests across ten suites** (`cd web && npm ci && npm test`;
+was 191). New regressions cover the crash report from a seeded heartbeat and
+log, a mid-load stage death (and a hidden or stale marker that must not
+report), a clean `pagehide` clearing the recorder, `downloadConcurrency` 3/6
+with `?downloads=` still overriding, the safe-start URL, the pre-frame
+engine-failure overlay and its absence after `noteEngineFrame`, and payload
+magic success, a captive-portal mismatch, and a gzip `.unityweb` container.
+The Chromium 153 integration from shell 1.1.1 still stands and was not
+re-run as a graphics change: zero WebGPU adapter requests with an adapter
+advertised, real WebGL pixels, viewport-bounded buffers, both Wasm modes,
+against the digest-verified pinned loader. `tools/test-browser.mjs` now
+expects `shell=1.1.2 WebGL2`. Gameplay on the affected iPad is not claimed
+until a device report shows non-zero FPS and a visible title screen.
 
 ## Still requires external assets/project/device work
 

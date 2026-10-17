@@ -16,6 +16,14 @@ import { section, test, eq, ok, done } from './testkit.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import zlib from 'node:zlib';
+
+// jsdom's media stub rejects play() with nobody awaiting it. Node treats that
+// as a fatal unhandledRejection and kills the suite; log it and keep going.
+process.on('unhandledRejection', (reason) => {
+  const message = (reason && (reason.stack || reason.message)) || reason;
+  console.error('unhandledRejection (logged, not fatal to the suite):', message);
+});
 
 const WEB = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -42,7 +50,7 @@ ok(inlineMatch, 'found the page script');
 const inline = inlineMatch[1];
 const shell = html.replace(inlineMatch[0], '<script id="page-script" type="text/plain"></script>');
 
-function bootPage({ fetchImpl, touch = true, userAgent, query = '' } = {}) {
+function bootPage({ fetchImpl, touch = true, userAgent, query = '', seedStorage } = {}) {
   const dom = new JSDOM(shell, {
     url: 'https://example.test/play.html' + query,
     pretendToBeVisual: true,
@@ -71,6 +79,13 @@ function bootPage({ fetchImpl, touch = true, userAgent, query = '' } = {}) {
   };
   win.cancelAnimationFrame = () => {};
   win.Symbol = Symbol;
+  // Seeded before the page script runs, so init sees a previous session's
+  // heartbeat / flight recorder / stage marker the way a reload would.
+  if (seedStorage) {
+    for (const [key, value] of Object.entries(seedStorage)) {
+      win.localStorage.setItem(key, typeof value === 'string' ? value : JSON.stringify(value));
+    }
+  }
   for (const source of libs) win.eval(source);
   win.eval(inline);
   return win;
@@ -566,7 +581,7 @@ await test('the reported iPad scene: 25 % on a 1180×734 Retina screen stays 295
 
   // The device log says which shell is running.
   const log = win.document.getElementById('logbox').textContent;
-  ok(/shell=1\.1\.1 WebGL2/.test(log), 'the menu log shows the shell and renderer: ' + (log.split('\n').find((l) => l.includes('shell=')) || '').trim());
+  ok(/shell=1\.1\.2 WebGL2/.test(log), 'the menu log shows the shell and renderer: ' + (log.split('\n').find((l) => l.includes('shell=')) || '').trim());
   win.close();
 });
 
@@ -786,6 +801,210 @@ await test('an idle media element gives its source back', () => {
   win.document.body.appendChild(playing);
   eq(win.SKPerf.internals().releaseIdleAudio(), 0, 'a playing element is not touched');
   eq(playing.getAttribute('src'), 'blob:https://example.test/music', 'and keeps its source');
+  win.close();
+});
+
+section('shell 1.1.2: crash report, safe mode, engine failures, payload');
+
+function crashReport(win) {
+  return win.document.getElementById('crashReport');
+}
+
+await test('a killed session leaves a crash report with the heap, the last log lines and safe mode', () => {
+  const lines = Array.from({ length: 20 }, (_, i) => 'saved-line-' + i);
+  const win = bootPage({
+    seedStorage: {
+      'sk.heartbeat': JSON.stringify({
+        at: Date.now() - 5000,
+        start: Date.now() - 120000,
+        preset: 'low',
+        heap: 1800,
+        visible: true,
+      }),
+      'sk.lastlog': JSON.stringify(lines),
+    },
+  });
+  const report = crashReport(win);
+  ok(!report.classList.contains('hidden'), 'the crash report is on the start screen');
+  const outcome = win.document.getElementById('crashOutcome').textContent;
+  ok(outcome.includes('heap 1800 MB at death'), 'names the heap at death: ' + outcome);
+  ok(!outcome.includes('It never reached the game.'), 'a session that booted did reach the game');
+  ok(/Starting preset:/.test(win.document.getElementById('crashPreset').textContent), 'names the starting preset');
+  const shown = win.document.getElementById('crashLog').textContent.split('\n');
+  eq(shown.length, 14, 'only the last 14 recorded lines');
+  eq(shown[0], 'saved-line-6', 'older lines are trimmed');
+  eq(shown[13], 'saved-line-19', 'the newest line is kept');
+  const safe = win.document.getElementById('safeStartBtn');
+  ok(!safe.classList.contains('hidden'), 'Start in safe mode is revealed');
+  eq(safe.textContent, 'Start in safe mode', 'the button says what it does');
+  eq(win.localStorage.getItem('sk.lastlog'), null, 'the recorder key was consumed so it cannot be shown twice');
+  const diagnostics = win.SKPerf.internals().diagnosticsText();
+  ok(diagnostics.includes('shell=1.1.2 WebGL2'), 'diagnostics name the shell');
+  ok(diagnostics.includes('userAgent:'), 'and the user agent');
+  ok(diagnostics.includes('last-session:'), 'and a last-session summary');
+  ok(diagnostics.includes('stage:'), 'and the stage');
+  ok(diagnostics.includes('saved-line-19'), 'and the previous log');
+  ok(diagnostics.includes('--- current log ---'), 'and the current log');
+  ok(win.document.getElementById('crashCopyBtn'), 'Copy diagnostics is on the report');
+  win.close();
+});
+
+await test('a mid-load stage death reports that the game was never reached; a hidden or stale marker does not', () => {
+  const win = bootPage({
+    seedStorage: {
+      'sk.stage': JSON.stringify({ stage: 'community archive 40%', at: Date.now() - 10000 }),
+      'sk.lastlog': JSON.stringify(['10:00:01  downloading part 12']),
+    },
+  });
+  const report = crashReport(win);
+  ok(!report.classList.contains('hidden'), 'a fresh mid-load stage opens the report');
+  const outcome = win.document.getElementById('crashOutcome').textContent;
+  ok(outcome.includes('It never reached the game.'), 'stage-only death says the game never started: ' + outcome);
+  ok(outcome.includes('community archive 40%'), 'and names the stage');
+  ok(win.document.getElementById('crashLog').textContent.includes('downloading part 12'), 'the saved log is shown');
+  ok(/Starting preset: Low/.test(win.document.getElementById('crashPreset').textContent), 'no crash ladder step without a heartbeat');
+  win.close();
+
+  const hidden = bootPage({
+    seedStorage: {
+      'sk.stage': JSON.stringify({ stage: 'hidden: download 10%', at: Date.now() - 1000 }),
+    },
+  });
+  ok(crashReport(hidden).classList.contains('hidden'), 'a background stage is not a crash report');
+  hidden.close();
+
+  const stale = bootPage({
+    seedStorage: {
+      'sk.stage': JSON.stringify({ stage: 'community archive 40%', at: Date.now() - 2 * 3600 * 1000 }),
+    },
+  });
+  ok(crashReport(stale).classList.contains('hidden'), 'a stage older than an hour is not a crash report');
+  stale.close();
+});
+
+await test('a clean pagehide clears the flight recorder so a normal close leaves no report', () => {
+  const win = bootPage();
+  const internals = win.SKPerf.internals();
+  internals.log('still alive');
+  internals.flushLog();
+  const saved = win.localStorage.getItem('sk.lastlog');
+  ok(saved && saved.includes('still alive'), 'the recorder wrote the log before the close');
+  win.dispatchEvent(new win.Event('pagehide'));
+  eq(win.localStorage.getItem('sk.lastlog'), null, 'pagehide cleared the recorder');
+  internals.flushLog();
+  eq(win.localStorage.getItem('sk.lastlog'), null, 'a later flush cannot restore a clean exit');
+  win.close();
+});
+
+await test('a small device downloads 3 archive parts at once, a desktop 6, and ?downloads= still overrides', () => {
+  const ipad = bootPage();
+  eq(ipad.SKPerf.internals().downloadConcurrency(), 3, 'iPad default is 3 in-flight parts');
+  ipad.close();
+  const desktop = bootPage({ touch: false, userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)' });
+  eq(desktop.SKPerf.internals().downloadConcurrency(), 6, 'desktop default stays 6');
+  desktop.close();
+  const overridden = bootPage({ query: '?downloads=2' });
+  eq(overridden.SKPerf.internals().downloadConcurrency(), 2, '?downloads= still overrides the device default');
+  overridden.close();
+});
+
+await test('safe mode reloads with the rock-bottom memory parameters', () => {
+  const win = bootPage({ query: '?community=1&foo=bar' });
+  const url = new URL(win.SKPerf.internals().safeStartUrl());
+  eq(url.origin + url.pathname, 'https://example.test/play.html', 'same page');
+  eq(url.searchParams.get('preset'), 'rock_bottom');
+  eq(url.searchParams.get('fps'), '24');
+  eq(url.searchParams.get('auto'), '1');
+  eq(url.searchParams.get('downloads'), '2');
+  eq(url.searchParams.get('bundleCacheMB'), '64');
+  eq(url.searchParams.get('foo'), 'bar', 'existing parameters are kept');
+  eq(url.searchParams.get('community'), '1', 'and so is the build selector');
+  win.close();
+});
+
+await test('an engine failure before the first frame raises the overlay, and not after noteEngineFrame', async () => {
+  const early = bootPage();
+  early.SKPerf.internals().surfaceEngineFailure('too early');
+  ok(early.document.getElementById('recover').classList.contains('hidden'), 'before boot the overlay stays down');
+  ok(early.document.getElementById('logbox').textContent.includes('too early'), 'and the failure is still logged');
+  early.close();
+
+  const win = await bootToUnity();
+  const internals = win.SKPerf.internals();
+  const recover = win.document.getElementById('recover');
+  const recoverMsg = win.document.getElementById('recoverMsg');
+  ok(recover.classList.contains('hidden'), 'a clean boot leaves the overlay down');
+  internals.surfaceEngineFailure('wasm compile aborted');
+  ok(!recover.classList.contains('hidden'), 'a pre-frame failure raises the overlay');
+  ok(recoverMsg.textContent.includes('The engine failed while starting and never drew a frame.'), 'says no frame was drawn');
+  ok(recoverMsg.textContent.includes('wasm compile aborted'), 'and names the failure: ' + recoverMsg.textContent.slice(0, 160));
+  win.document.getElementById('recoverWait').click();
+  ok(recover.classList.contains('hidden'), 'the player can dismiss it');
+  internals.noteEngineFrame();
+  internals.surfaceEngineFailure('later glitch');
+  ok(recover.classList.contains('hidden'), 'after a frame the overlay stays down');
+  ok(win.document.getElementById('logbox').textContent.includes('later glitch'), 'the later failure is still logged');
+  win.close();
+});
+
+function headResponse(bytes, status = 206) {
+  const copy = Uint8Array.from(bytes);
+  const buffer = copy.buffer.slice(copy.byteOffset, copy.byteOffset + copy.byteLength);
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    arrayBuffer: async () => buffer,
+  };
+}
+
+await test('payload magic check accepts real Unity data and rejects a captive-portal page', async () => {
+  const win = bootPage();
+  const dataMagic = Array.from(new TextEncoder().encode('UnityWebData1.0\0'));
+  const wasmMagic = [0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00];
+  const ranges = [];
+  win.fetch = async (url, opts) => {
+    const range = (opts && opts.headers && (opts.headers.Range || opts.headers.range)) || '';
+    ranges.push(String(url) + ' ' + range);
+    return headResponse(String(url).includes('data') ? dataMagic : wasmMagic);
+  };
+  eq(await win.SKPerf.internals().verifyPayloadMagics('https://cdn.test/game.data', 'https://cdn.test/game.wasm'), true, 'matching magics pass');
+  const probes = ranges.filter((line) => line.includes('cdn.test'));
+  eq(probes.length, 2, 'one range probe per payload: ' + ranges.join(' | '));
+  ok(probes.every((line) => line.endsWith('bytes=0-15')), 'both probes use a 16-byte Range: ' + probes.join(' | '));
+  const log = win.document.getElementById('logbox').textContent;
+  ok(/payload check:/.test(log) && /the real game data reached Unity/.test(log), 'success is logged: ' + log.split('\n').filter((l) => l.includes('payload check')).join(' | '));
+
+  win.fetch = async (url) => headResponse(new TextEncoder().encode(String(url).includes('data') ? '<!DOCTYPE html><html>' : 'not-wasm-bytes!!'), 200);
+  eq(await win.SKPerf.internals().verifyPayloadMagics('https://cdn.test/game.data', 'https://cdn.test/game.wasm'), false, 'captive portal HTML is not game data');
+  const errLog = win.document.getElementById('logbox').textContent;
+  ok(/does not look like/.test(errLog), 'mismatch says it does not look like game data');
+  ok(/\(head:/.test(errLog), 'and includes the head bytes');
+  ok(/the cached copy is wrong/.test(errLog), 'and tells the player the cache is wrong');
+  ok(/clear this site's website data/.test(errLog), 'and how to recover without pretending the graphics setting will fix it');
+
+  // The pinned .unityweb files are gzip containers. fetch does not unwrap that
+  // layer unless the server sets Content-Encoding, so the probe must inflate
+  // a small prefix rather than call a good cache corrupt.
+  if (typeof DecompressionStream === 'function') {
+    win.DecompressionStream = DecompressionStream;
+    if (typeof win.ReadableStream !== 'function') win.ReadableStream = ReadableStream;
+    const gzipped = zlib.gzipSync(Buffer.concat([
+      Buffer.from('UnityWebData1.0\0'),
+      Buffer.alloc(64, 7),
+    ]));
+    const wasmGz = zlib.gzipSync(Buffer.from([0x00, 0x61, 0x73, 0x6d, 1, 0, 0, 0]));
+    const gzipRanges = [];
+    win.fetch = async (url, opts) => {
+      gzipRanges.push((opts && opts.headers && opts.headers.Range) || '');
+      const which = String(url).includes('data') ? gzipped : wasmGz;
+      const match = /bytes=0-(\d+)/.exec((opts && opts.headers && opts.headers.Range) || '');
+      const n = match ? Number(match[1]) + 1 : which.length;
+      return headResponse(which.subarray(0, n), 206);
+    };
+    eq(await win.SKPerf.internals().verifyPayloadMagics('https://cdn.test/game.data.unityweb', 'https://cdn.test/game.wasm.unityweb'), true, 'a gzip .unityweb container still counts as the real data');
+    ok(gzipRanges.includes('bytes=0-15') && gzipRanges.includes('bytes=0-4095'), 'gzip needs a short follow-up range, not the whole file: ' + gzipRanges.join(','));
+    ok(/the real game data reached Unity/.test(win.document.getElementById('logbox').textContent), 'and the success line is still logged');
+  }
   win.close();
 });
 
