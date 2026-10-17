@@ -28,7 +28,7 @@
   #canvas-wrap{position:fixed;inset:0;display:grid;place-items:center;overflow:hidden;background:#000}
   #unity-canvas{
     display:block;background:#000;touch-action:none;outline:none;
-    width:100%;height:100%;transform-origin:50% 50%;
+    width:100%;height:100%;
   }
 
   /* ---------- loading / start screen ---------- */
@@ -239,12 +239,12 @@
   <div id="logbox"></div>
 </div>
 
-<script src="js/stream.js?v=1.1.0"></script>
+<script src="js/stream.js?v=1.1.1"></script>
 <script src="js/manifest.js"></script>
 <script src="js/zip-plan.js"></script>
-<script src="js/asset-cache.js?v=1.1.0"></script>
-<script src="js/community-build.js?v=1.1.0"></script>
-<script src="js/unity-startup.js?v=1.1.0"></script>
+<script src="js/asset-cache.js?v=1.1.1"></script>
+<script src="js/community-build.js?v=1.1.1"></script>
+<script src="js/unity-startup.js?v=1.1.1"></script>
 <script src="js/zip.min.js"></script>
 <script src="js/save-codec.js"></script>
 <script src="js/boss-scenes.js"></script>
@@ -263,6 +263,20 @@
  * ==========================================================================*/
 (function () {
   'use strict';
+
+  /* ---------------------------------------------------------------- *
+   * Shell version — bumped when the page itself changes, so the log on
+   * the device says which shell is running (`shell=1.1.1 WebGL2`). The
+   * `?v=` query on the script tags below follows this number; game-data
+   * cache keys are deliberately independent of it, so upgrading the
+   * shell never invalidates downloaded assets or saves.
+   * ---------------------------------------------------------------- */
+  var SHELL_VERSION = '1.1.1';
+  // The only renderer this build is allowed to use. The pinned loader's
+  // WebGPU adapter probe is removed (js/unity-startup.js), a preRun guard
+  // clears the flag for any loader that could not be patched, and the
+  // WebGL context attributes request a plain WebGL 2 context.
+  var SHELL_RENDERER = 'WebGL2';
 
   /* ---------------------------------------------------------------- *
    * Build description — filled in from Build/build-manifest.json
@@ -718,10 +732,16 @@
    * asked of the GPU and CPU:
    *
    *   render scale  the size of the canvas backing store, i.e. the number of
-   *                 pixels the game really draws. 70 % draws half the pixels
-   *                 and the result is stretched back over the screen with a
-   *                 CSS transform (softer picture, much less GPU work and
-   *                 much less video memory).
+   *                 pixels the game really draws. 70 % draws half the pixels.
+   *                 The canvas element itself always fills the viewport with
+   *                 plain CSS, and the browser stretches the smaller buffer
+   *                 over it (softer picture, much less GPU work and much
+   *                 less video memory). There is deliberately no CSS
+   *                 transform: Unity's runtime measures the transformed
+   *                 rectangle and multiplies its own scaling on top of it —
+   *                 that is how a 25 % render scale once asked Safari for a
+   *                 9440×5872 render target on an 1180×734 screen, which
+   *                 WebGPU refused to configure, and the game stayed black.
    *   frame cap     how often the game loop may run. iPad Safari drives
    *                 requestAnimationFrame at up to 120 Hz on ProMotion
    *                 screens, which doubles the work for a game that is happy
@@ -838,43 +858,48 @@
       (perf.crashSteps ? ' (lowered after ' + perf.crashSteps + ' crash' + (perf.crashSteps > 1 ? 'es' : '') + ')' : '');
   }
 
-  /* --- putting the render scale into effect --- */
-  function setCanvasCss(w, h, q) {
-    canvas.style.width = w + 'px';
-    canvas.style.height = h + 'px';
-    canvas.style.transform = q === 1 ? 'none' : 'scale(' + (1 / q).toFixed(4) + ')';
+  /* --- putting the render scale into effect ---
+   *
+   * The division of labour is strict: the render scale owns the canvas
+   * *backing store* (canvas.width/height, what the game draws into) and
+   * full-viewport CSS owns the *display size*, with no transform. Unity's
+   * own resize logic is told to keep its hands off both
+   * (devicePixelRatio: 1 and matchWebGLToCanvasSize: false in
+   * makeUnityConfig), because the last time it participated it multiplied
+   * a Retina screen and a CSS scale factor into a 9440×5872 render target
+   * on an 1180×734 device — a context configuration error and a black
+   * screen.
+   */
+  function setCanvasCss() {
+    // Plain CSS fills the viewport; the buffer size below decides the
+    // sharpness. Nothing here may scale or transform.
+    canvas.style.width = '100%';
+    canvas.style.height = '100%';
+    canvas.style.transform = 'none';
+  }
+  function setBackingStore(w, h) {
+    // Assigning canvas.width/height — even with the *same* values — resets
+    // the WebGL drawing buffer and throws away the frame it holds, so a
+    // size that has not changed must not be assigned again. Reapplying the
+    // graphics settings therefore preserves the picture already on screen.
+    var changed = false;
+    if (canvas.width !== w) { canvas.width = w; changed = true; }
+    if (canvas.height !== h) { canvas.height = h; changed = true; }
+    return changed;
   }
   function applyResolution() {
     var q = perf.scale;
     var w = Math.max(160, Math.round((window.innerWidth || 1024) * q));
     var h = Math.max(120, Math.round((window.innerHeight || 768) * q));
-    setCanvasCss(w, h, q);
-    if (!unityInstance) {
-      // Unity has not taken the canvas over yet; set the size directly.
-      canvas.width = w;
-      canvas.height = h;
-    } else {
-      applyGameResolution(w, h);
-    }
-  }
-  var resFixTimer = 0;
-  function applyGameResolution(w, h) {
-    var m = unityModule();
-    if (!m || typeof m.setCanvasSize !== 'function') return;
-    try {
-      // Browser.setCanvasSize() resizes the backing store *and* tells Unity
-      // the screen changed, which is what makes the render target follow.
-      m.setCanvasSize(w, h);
-      clearTimeout(resFixTimer);
-      // Unity's resize helper drops the CSS size it does not own, so put it
-      // back a moment later and report what the canvas actually ended up at.
-      resFixTimer = setTimeout(function () {
-        setCanvasCss(w, h, perf.scale);
-        log('render target: ' + canvas.width + '×' + canvas.height +
-            ' for a ' + (window.innerWidth || 0) + '×' + (window.innerHeight || 0) + ' screen');
-      }, 60);
-    } catch (e) {
-      logError('could not resize the game canvas: ' + e.message);
+    setCanvasCss();
+    var changed = setBackingStore(w, h);
+    // The backing store is written directly (never Module.setCanvasSize,
+    // which re-derives the size from the CSS box and reapplies scaling).
+    // The WebGL default framebuffer follows the canvas drawing buffer, so
+    // the game picks the new size up on the next frame.
+    if (changed && unityInstance) {
+      log('render target: ' + canvas.width + '×' + canvas.height +
+          ' for a ' + (window.innerWidth || 0) + '×' + (window.innerHeight || 0) + ' screen');
     }
   }
 
@@ -927,7 +952,17 @@
       var entry = list[i];
       delete rafById[entry.id];
       if (entry.cancelled) continue;
-      try { entry.cb(now); } catch (e) { logError('frame callback: ' + ((e && e.message) || e)); }
+      try { entry.cb(now); }
+      catch (e) {
+        var message = (e && e.message) || String(e);
+        logError('frame callback: ' + message);
+        // A throwing frame callback is how the black screen announced
+        // itself on the affected iPad: WebGPU could not configure the
+        // canvas, every frame died with the same error, and the player
+        // was left with a silent 0 fps screen. Once the game is up, put
+        // the recovery overlay up instead of only logging it.
+        if (booted) showRecover(DRAW_FAILURE_MSG + message);
+      }
     }
   }
   function scheduleFrames() {
@@ -1055,14 +1090,15 @@
    * collector runs, and how hard it is asked to work.
    *
    * Below GC_PRESSURE_MB the game is comfortable and a collect every
-   * minute is enough (and costs nothing). Above it the game is close to
-   * the 1 GB ceiling `makeUnityConfig()` allows, so the collector runs
-   * four times as often and is asked for a *full* collection: the
+   * minute is enough (and costs nothing). Above it the pinned build's
+   * fixed ~2 GiB heap is filling up fast — remember iPadOS kills a tab
+   * long before 2 GB — so the collector runs four times as often and is
+   * asked for a *full* collection: the
    * IL2CPP collector twice in a row — the first pass only makes the
    * unreachable objects collectable, the second actually frees them —
    * and the native side of the heap released as well.
    * ---------------------------------------------------------------- */
-  var GC_PRESSURE_MB = 900;          // the heap is near the cap from here on
+  var GC_PRESSURE_MB = 900;          // the heap is filling up from here on
   var GC_TICKS_NORMAL = 60;          // collect once a minute
   var GC_TICKS_PRESSURE = 15;        // …and four times a minute under pressure
 
@@ -1274,8 +1310,10 @@
   }
 
   // Size of the wasm heap: the game data plus everything the running game
-  // allocates. iPadOS kills a tab long before the 2 GB this heap is allowed to
-  // reach, so this is the number to watch.
+  // allocates. The pinned community binary compiles in a ~2 GiB heap and
+  // reports it whole from boot — "2048 MB of wasm heap" in the log is real,
+  // not a reporting bug — while iPadOS kills a tab long before 2 GB, so
+  // this is the number to watch.
   function unityModule() {
     var inst = unityInstance || (typeof window !== 'undefined' ? window.unityInstance : null);
     try { return inst && inst.Module ? inst.Module : null; } catch (e) { return null; }
@@ -1331,9 +1369,11 @@
    * It also raced with iPadOS itself: Safari's own jetsam kill arrives
    * without warning, so the countdown usually never finished.
    *
-   * The ceiling now lives in `makeUnityConfig()` (a 1 GB wasm heap) and
-   * in the graphics ladder (a smaller canvas = less video memory). The
-   * page *warns* about memory; it never reloads on its own.
+   * The heap size itself is not a page setting: the pinned binary ships
+   * its fixed ~2 GiB heap and ignores the size hints in
+   * `makeUnityConfig()`, so what is left is the graphics ladder (a
+   * smaller canvas = less video memory) and the collection cadence
+   * above. The page *warns* about memory; it never reloads on its own.
    * ---------------------------------------------------------------- */
   var HARD_MEMORY_CAP_MB = Infinity;   // no automatic reload, ever
   var memCapTimer = 0;                 // never armed
@@ -1446,6 +1486,8 @@
   var HANG_MSG =
     'The game has not drawn anything for 25 seconds. That usually means iPadOS ' +
     'took the graphics context away because it ran out of memory.';
+  var DRAW_FAILURE_MSG =
+    'The game failed while drawing to the screen and could not continue. Safari reported: ';
 
   canvas.addEventListener('webglcontextlost', function (e) {
     // preventDefault() is what allows the context to be restored at all.
@@ -2393,18 +2435,42 @@
       companyName: 'Team Cherry',
       productName: 'Hollow Knight Silksong',
       productVersion: '1.0',
-      // The wasm heap is the biggest thing in the tab, and it is what
-      // iPadOS kills the tab over. 1 GB is the ceiling: the old 1.4 GB
-      // let Unity grow straight into the range where Safari's jetsam
-      // killer takes the whole WebContent process down without a
-      // chance to draw anything.
+      // The pinned community binary ships a ~2 GiB wasm heap of its own and
+      // *ignores both of the settings below* — the reported "2048 MB of
+      // wasm heap" is real, and no HTML setting can turn it into a 1 GiB
+      // heap. They are kept for a self-built standard build, which does
+      // honour them; patching the heap size into the wasm module is not
+      // attempted, because a wrongly patched allocator corrupts the heap.
+      // The working levers are the render scale (a smaller canvas buffer)
+      // and the managed-heap collection cadence below.
       maximumHeapSize: 1073741824,
-      // Start with 16 MB instead of 32 MB: the page should not front-load
-      // RAM the game has not asked for yet, and Emscripten's heap grows
-      // in big steps from wherever it starts. The game's own data is
-      // copied in by Unity once the runtime is up.
+      // See above: documentation for builds that honour it; the pinned
+      // binary starts at its own compiled-in size either way.
       INITIAL_MEMORY: 16777216,
-      // Keep the WebGL backing buffers small on iPad Safari.
+      // The page owns the canvas buffer size (applyResolution writes
+      // canvas.width/height at the render scale). These two settings keep
+      // Unity's runtime from re-deriving a buffer size of its own:
+      //   devicePixelRatio 1 — a Retina screen must not double the buffer;
+      //   matchWebGLToCanvasSize false — Unity must not size the buffer
+      //   from the CSS box, because that box is the full viewport and
+      //   would ignore the render scale (and it measured transformed CSS
+      //   sizes, which no longer exist anyway). The iPad evidence for both
+      //   was one render target: 9440×5872 on a 1180×734 screen.
+      devicePixelRatio: 1,
+      matchWebGLToCanvasSize: false,
+      // Belt and braces for the renderer choice: the pinned loader's
+      // WebGPU adapter probe is already cut out by js/unity-startup.js
+      // (digest-verified), but a loader that could not be patched — a
+      // digest that changed upstream, or a stock loader from a self-built
+      // build — must also stay on WebGL 2. Unity's main has not started
+      // when preRun fires, so the flag is cleared before the framework
+      // picks a renderer. navigator.gpu is deliberately not touched.
+      preRun: [function (Module) {
+        if (Module && Module.SystemInfo && Module.SystemInfo.hasWebGPU) {
+          Module.SystemInfo.hasWebGPU = false;
+          if (typeof console !== 'undefined' && console.log) console.log('[ss]', 'preRun: SystemInfo.hasWebGPU cleared — WebGL 2 renderer enforced');
+        }
+      }],
       webglContextAttributes: {
         alpha: false,
         depth: true,
@@ -2561,7 +2627,7 @@
           // A cached copy is checked with sampled digests (a few MB of hashing,
           // instant on iPad); "?verify=full" hashes the whole file instead.
           verify: params.get('verify') === 'full' ? 'full' : (spec.integrity ? 'sample' : 'size'),
-          workerUrl: 'js/writer.js?v=1.1.0',
+          workerUrl: 'js/writer.js?v=1.1.1',
           fetchImpl: SKCommunityBuild.timedFetch(window.fetch.bind(window), 30000),
           stallTimeoutMs: 45000,
           signal: controller ? controller.signal : undefined,
@@ -2670,7 +2736,7 @@
         // the community CDN), so the archive may name its root itself. A mirror
         // can be forced with ?archiveBase=<url> — see web/COMMUNITY-BUILD.md.
         base: params.get('archiveBase') || (source.assetArchive && source.assetArchive.base) || ASSET_BASE,
-        workerUrl: 'js/writer.js?v=1.1.0',
+        workerUrl: 'js/writer.js?v=1.1.1',
         concurrency: Math.max(1, Math.min(Number(params.get('downloads')) || 6, 8)),
         stallTimeoutMs: 45000,
         bundleCacheBytes: Math.max(0, Math.min(params.has('bundleCacheMB') ? Number(params.get('bundleCacheMB')) || 0 : 512, 1024)) * 1048576,
@@ -2878,6 +2944,12 @@
       var message = (err && err.message) || String(err);
       if (err && err.name === 'AbortError') message = 'Cancelled';
       logError('load failed: ' + message, err && err.stack ? String(err.stack).split('\n').slice(0, 4).join(' | ') : '');
+      // A startup failure can arrive after the loading overlay was already
+      // hidden (the boot resolves first, then late wasm or renderer setup
+      // still fails). Without this, the error would only exist in the log
+      // behind a black screen — put the start screen back up.
+      screenEl.classList.remove('hidden');
+      fpsEl.classList.add('hidden');
       setStatus('Could not load the game');
       errEl.textContent =
         message + '\n\n' +
@@ -2944,7 +3016,8 @@
     }
     fpsEl.classList.add('hidden');
 
-    log('Silksong web loader', 'stream=' + SKStream.VERSION, 'touch=' + isTouch());
+    log('Silksong web loader', 'shell=' + SHELL_VERSION + ' ' + SHELL_RENDERER,
+        'stream=' + SKStream.VERSION, 'touch=' + isTouch());
     log('graphics: ' + perfDescription());
 
     if (lastSessionInfo && lastSessionInfo.crashed) {

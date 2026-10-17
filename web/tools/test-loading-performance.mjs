@@ -263,10 +263,42 @@ await test('Wasm encoding sniffing handles split headers and rejects corrupt fil
   await rejects(startup.wasmResponse(new Response('bad encoding')), /encoding/);
   await rejects(startup.wasmResponse(new Response(new Uint8Array([0, 1]))), /truncated/);
 });
+/* The WebGPU adapter probe, byte for byte as it appears in the pinned
+ * Build/w-pt.loader.js (SHA-256 6705d6c0…). This is the decision that sent
+ * the affected iPad into a WebGPU renderer its Safari could not configure:
+ * an adapter was found, the canvas context configure failed with a
+ * 9440×5872 render target, and not one frame was drawn. */
+const WEBGPU_PROBE = 'navigator.gpu ? navigator.gpu.requestAdapter().then(function(e) {\n' +
+  '                b.SystemInfo.hasWebGPU = !!e,\n' +
+  '                t(b.SystemInfo.hasWebGPU)\n' +
+  '            }) : t(!1)';
+
+function loaderFixture() {
+  return 'var A = { hasUnityMarker: function(e) {\n                return true\n            } }; ' +
+    'function Q() { return new Promise(function(t, e) {\n            ' + WEBGPU_PROBE + '\n        }\n        ).then(function() { P() }); } ' +
+    'function P() { Promise.all([Promise.resolve(0).then(function(){}), T("codeUrl")]); }';
+}
+
 await test('unsupported loader patterns fall back rather than guessing a patch', async () => {
   await rejects(Promise.resolve().then(() => startup.patchLoader('new unknown loader')), /not unique/);
-  const patched = startup.patchLoader('var A = { hasUnityMarker: function(e) {\n                return true\n            } }; function P() { Promise.all([Promise.resolve(0).then(function(){}), T("codeUrl")]); }');
+  const patched = startup.patchLoader(loaderFixture(), true);
   ok(patched.includes('b.instantiateWasm ? Promise.resolve(null)')); new vm.Script(patched);
+});
+
+await test('the pinned loader drops the WebGPU probe and selects WebGL 2 in both Wasm modes', async () => {
+  for (const streaming of [true, false]) {
+    const patched = startup.patchLoader(loaderFixture(), streaming);
+    ok(!patched.includes('requestAdapter'), 'streaming=' + streaming + ': no adapter is ever requested');
+    ok(patched.includes('b.SystemInfo.hasWebGPU = !1'), 'streaming=' + streaming + ': SystemInfo.hasWebGPU is hard-set to false');
+    ok(patched.includes('.then(function() { P() })'), 'streaming=' + streaming + ': startup still continues through the same then');
+    ok(patched.includes('hasUnityMarker: function(e) { return e && e.length > 2'), 'streaming=' + streaming + ': the gzip guard is still applied');
+    if (streaming) ok(patched.includes('b.instantiateWasm ? Promise.resolve(null)'), 'streaming: the native compile hook is still applied');
+    else ok(!patched.includes('b.instantiateWasm ?'), 'stock: the Wasm hook is left alone');
+    new vm.Script(patched);      // the patched loader must still be valid JavaScript
+  }
+  // A loader without the exact probe is never patched — it must fall back.
+  const probeless = loaderFixture().replace(WEBGPU_PROBE, 'b.SystemInfo.hasWebGPU = !!e');
+  await rejects(Promise.resolve().then(() => startup.patchLoader(probeless, true)), /not unique/);
 });
 await test('a changed upstream digest uses the original loader and never installs a patch', async () => {
   const source = JSON.parse(fs.readFileSync(new URL('../community-build.json', import.meta.url)));

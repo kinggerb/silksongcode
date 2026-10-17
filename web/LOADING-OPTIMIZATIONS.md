@@ -168,6 +168,46 @@ For production object storage/CDN configure the equivalent headers there.
   The connected GitHub app cannot install workflows; validation for this change
   was run locally, not through an active Actions workflow.
 
+## Follow-up (shell 1.1.1): force WebGL 2, pin the canvas buffer
+
+Fast initialization succeeded on the target iPad and the game still showed a
+black screen at 0 fps: `ERROR frame callback: GPUCanvasContext.configure:
+Unable to configure. render target: 9440×5872 for a 1180×734 screen`. The
+pinned Unity 6 loader found a WebGPU adapter, the renderer chose WebGPU, and
+the canvas context configure failed — initialization success was not
+rendering success, and the page's small render scale never bounded the actual
+GPU allocation (8× the viewport per axis). The shell therefore:
+
+- removes the SHA-verified pinned loader's WebGPU adapter probe in both Wasm
+  modes (no adapter request, `SystemInfo.hasWebGPU` forced false before the
+  framework picks a renderer), with a `preRun` guard clearing the flag again
+  for any loader that could not be text-patched;
+- owns the canvas size strictly: `devicePixelRatio: 1`,
+  `matchWebGLToCanvasSize: false`, full-viewport CSS with no transform, and
+  the backing store written directly (never `Module.setCanvasSize`). A 25 %
+  render scale on an 1180×734 Retina screen is a 295×184 buffer. An
+  unchanged size is never reassigned — the assignment itself clears the
+  WebGL frame;
+- raises the recovery overlay for a throwing frame callback after boot (the
+  failure used to be a silent 0 fps log line), and restores the error screen
+  when a startup failure lands after the loading overlay was hidden;
+- versions the shell scripts as `?v=1.1.1` and logs
+  `shell=1.1.1 WebGL2`. Game-data cache keys, saves and downloaded assets
+  are untouched. The reported 2 GiB wasm heap is real (the pinned binary
+  ignores the heap size hints); the misleading comments are corrected.
+
+Validation: **191 tests across ten suites** (`cd web && npm ci && npm test`),
+including regressions for the exact probe in both Wasm modes, the fallback
+renderer guard, the reported Retina/25 % sizing (295×184, no-op resize
+preserves buffers) and the visible GPU-failure overlay. The real-browser
+integration was strengthened to advertise a WebGPU adapter, require **zero**
+adapter requests, read **real WebGL pixels** back across several frames and
+require every sampled buffer to stay within the viewport; it passes in
+Chromium 153 against the exact pinned loader, which this session could
+download and digest-verify. Full gameplay on the affected iPad still needs a
+device check: the boot log must show `shell=1.1.1 WebGL2`, the buffer must
+stay 295×184 at 25 %, and FPS must be non-zero with the title screen visible.
+
 Browser prerequisites:
 
 ```sh

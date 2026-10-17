@@ -68,9 +68,25 @@ const framework = Buffer.from(`function unityFramework(b) {
       var range = await fetch(url, {headers:{Range:'bytes=0-31'}});
       if (range.status !== 206 || (await range.arrayBuffer()).byteLength !== 32) throw Error('range response broken');
       var gl = b.canvas.getContext('webgl2');
-      if (gl) { gl.clearColor(0.1,0.5,0.2,1); gl.clear(gl.COLOR_BUFFER_BIT); }
-      window.__fixture = {bytes:bytes.byteLength, hash:hash, streaming:!!b.instantiateWasm};
-      b.postRun.forEach(function(fn) { fn(); });
+      if (gl) {
+        gl.clearColor(0.1,0.5,0.2,1); gl.clear(gl.COLOR_BUFFER_BIT);
+        var px = new Uint8Array(4);
+        gl.readPixels(Math.floor(b.canvas.width/2), Math.floor(b.canvas.height/2), 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+        window.__fixturePixel = [px[0], px[1], px[2], px[3]];
+      }
+      window.__fixture = {bytes:bytes.byteLength, hash:hash, streaming:!!b.instantiateWasm,
+        systemWebGPU: b.SystemInfo ? b.SystemInfo.hasWebGPU : 'absent',
+        matchWebGL: b.matchWebGLToCanvasSize === false && b.devicePixelRatio === 1,
+        buffer: [b.canvas.width, b.canvas.height]};
+      // Sample the drawing buffer across several real frames: a buffer that
+      // only momentary looks right (or one Unity re-inflates afterwards)
+      // must fail here, not on the iPad.
+      window.__frameBuffers = [];
+      (function sampleBuffer() {
+        window.__frameBuffers.push([b.canvas.width, b.canvas.height, window.innerWidth, window.innerHeight]);
+        if (window.__frameBuffers.length < 6) requestAnimationFrame(sampleBuffer);
+      })();
+      b.postRun.forEach(function(fn) { fn(b); });
       if (window.SKLoading) window.SKLoading.markPlayable();
     })().catch(function(error) { console.error('fixture error',error); if(b.startupErrorHandler) b.startupErrorHandler(error); else throw error; });
   }
@@ -114,6 +130,21 @@ const summaries = [];
 try {
   browser = await chromium.launch(launch);
   const context = await browser.newContext({ viewport: { width: 1024, height: 768 } });
+  // Advertise a WebGPU adapter from the very first page: this is the world
+  // the affected iPad lives in (Safari with navigator.gpu), the world in
+  // which the stock loader picked WebGPU and died configuring the canvas.
+  // The fix must not ask for the adapter at all.
+  await context.addInitScript(() => {
+    window.__gpuAdapterRequests = 0;
+    try {
+      Object.defineProperty(Navigator.prototype, 'gpu', {
+        configurable: true,
+        get() {
+          return { requestAdapter: () => { window.__gpuAdapterRequests++; return Promise.resolve({ features: new Set(), limits: {} }); } };
+        },
+      });
+    } catch (e) { window.__gpuInitError = String((e && e.message) || e); }
+  });
   const page = await context.newPage(), errors = [], logs = [];
   page.on('pageerror', error => errors.push(error.message));
   page.on('console', message => logs.push(message.text()));
@@ -125,18 +156,45 @@ try {
       await target.waitForFunction(() => window.unityInstance || !document.getElementById('err').classList.contains('hidden'), null, { timeout: 20000 });
     } catch (error) { throw new Error(error.message + '\nERRORS: ' + errors.join(' | ') + '\n' + logs.slice(-35).join('\n')); }
     const result = await target.evaluate(() => ({ ready: !!window.unityInstance, fixture: window.__fixture,
+      gpuAdapterRequests: window.__gpuAdapterRequests, gpuInitError: window.__gpuInitError,
       error: document.getElementById('err').textContent, timings: window.SKLoading.timings(), overlayHidden: document.getElementById('screen').classList.contains('hidden') }));
     assert.equal(result.ready, true, result.error + '\n' + logs.slice(-20).join('\n'));
     assert.equal(result.overlayHidden, true); assert.equal(result.fixture.hash, expectedHash);
     assert.ok(result.timings.some(item => item.stage === 'first controllable gameplay'));
+    // The renderer decision: this browser advertises a WebGPU adapter, and
+    // the loader must neither ask for it nor point the game at WebGPU.
+    assert.equal(result.gpuInitError, undefined, 'the WebGPU advertisement installed cleanly');
+    assert.equal(result.gpuAdapterRequests, 0, 'a WebGPU adapter was advertised but never requested');
+    assert.equal(result.fixture.systemWebGPU, false, 'SystemInfo.hasWebGPU is false after the preRun guard — WebGL 2 renderer');
+    assert.equal(result.fixture.matchWebGL, true, 'the page owns the buffer (devicePixelRatio 1, matchWebGLToCanvasSize off)');
+    assert.ok(result.fixture.buffer[0] <= 1024 && result.fixture.buffer[1] <= 768,
+      'the drawing buffer stays within the viewport: ' + result.fixture.buffer.join('×'));
     return { elapsedMs: Date.now() - start, result };
   }
   const boot = query => bootFor(page, query);
   const cold = await boot();
   assert.equal(cold.result.fixture.streaming, true, 'real pinned loader must use the custom native compiler');
+  assert.ok(logs.some(line => line.includes('shell=1.1.1 WebGL2')), 'the boot log names the shell and the renderer');
+  assert.ok(logs.some(line => line.includes('WebGL 2')), 'the verified WebGL 2 selection is logged');
   assert.ok(transferred < archive.length / 2, 'cold boot should not download unused middle bundles');
   assert.equal(new Set(partRequests).size, partRequests.length, 'deduplicated part requests');
-  summaries.push({ test: 'cold lazy + native HTTP gzip + pinned loader', elapsedMs: cold.elapsedMs, archiveBytesFetched: transferred, fullArchiveBytes: archive.length });
+  // Real WebGL pixels, sampled across several frames — the original version
+  // of this test only asserted asset bytes and engine readiness, which is
+  // exactly how a 0 fps black screen slipped through.
+  const frames = await page.evaluate(() => new Promise((resolve) => {
+    const check = () => (window.__frameBuffers && window.__frameBuffers.length >= 5)
+      ? resolve({ pixel: window.__fixturePixel, buffers: window.__frameBuffers })
+      : requestAnimationFrame(check);
+    check();
+  }));
+  assert.ok(frames.pixel, 'real WebGL pixels were read back from the live canvas');
+  assert.ok(Math.abs(frames.pixel[0] - 26) <= 2 && Math.abs(frames.pixel[1] - 128) <= 2 && Math.abs(frames.pixel[2] - 51) <= 2 && frames.pixel[3] === 255,
+    'the cleared frame really reached the buffer: ' + frames.pixel.join(','));
+  for (const [w, h] of frames.buffers) {
+    assert.ok(w <= 1024 && h <= 768, 'every sampled frame stays within the viewport, got ' + w + '×' + h);
+  }
+  summaries.push({ test: 'cold lazy + native HTTP gzip + pinned loader', elapsedMs: cold.elapsedMs, archiveBytesFetched: transferred, fullArchiveBytes: archive.length,
+    webglPixel: frames.pixel, sampledBuffers: frames.buffers.length });
   await page.evaluate(async () => {
     localStorage.setItem('save-sentinel', 'preserved');
     await new Promise((resolve, reject) => { const r = indexedDB.open('save-sentinel', 1); r.onupgradeneeded = () => r.result.createObjectStore('saves'); r.onsuccess = () => { const tx = r.result.transaction('saves', 'readwrite'); tx.objectStore('saves').put('preserved', 'slot1'); tx.oncomplete = resolve; tx.onerror = reject; }; });
@@ -174,7 +232,7 @@ try {
   await Promise.all(tabs.map(tab => tab.close()));
   assert.deepEqual(errors, [], 'no uncaught browser errors');
   console.log(JSON.stringify({ browser: await browser.version(), tests: summaries, uncaughtErrors: errors }, null, 2));
-  console.log('Browser integration passed: real OPFS/cache/worker, lazy and eager boot, pinned loader hook, native gzip/Wasm, byte-exact bundles/ranges, saved data, and stalled-request cleanup.');
+  console.log('Browser integration passed: real OPFS/cache/worker, lazy and eager boot, pinned loader hook (no WebGPU adapter request, WebGL 2 forced), native gzip/Wasm, byte-exact bundles/ranges, real WebGL pixels across frames, viewport-bounded buffers, saved data, and stalled-request cleanup.');
 } finally {
   if (browser) await browser.close();
   server.closeAllConnections(); await new Promise(resolve => server.close(resolve));
