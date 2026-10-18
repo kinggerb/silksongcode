@@ -28,29 +28,35 @@ for implementation, tests, alternate hosting, direct bundles and controls.
 
 - Unity loader, framework, data, and wasm files are fetched from the pinned
   source CDN.
-- The Addressables ZIP is split into 111 files totalling exactly
-  `1,847,328,572` bytes (**1.72 GiB**; the page displays `1761.7 MB`). It is the
-  art-preserving rebuild of the upstream archive (see [The slim archive](#the-slim-archive)),
-  published under the `art-preserved-20261017` tag and pinned to commit
-  `a2c4553a3e40ee536672eabb39341856e0ba35ee`. GitHub raw serves the parts and
+- The Addressables ZIP is split into 100 files totalling exactly
+  `2,083,139,638` bytes (**1.94 GiB**; the page displays `1986.6 MB`). It is the
+  **unmodified upstream archive** of the reference port
+  (`web-ports/hollow-knight-silksong`), byte for byte, pinned to commit
+  `bcbe014765f2f6ca4b1d82ac25755a0299a600ab`. GitHub raw serves the parts and
   jsDelivr is recorded as a mirror (see [Two hosts for the archive parts](#two-hosts-for-the-archive-parts)).
-  Eager mode streams all 111 parts to OPFS before Unity starts. In opt-in lazy
+  Eager mode streams all 100 parts to OPFS before Unity starts. In opt-in lazy
   mode, only the parts covering ZIP metadata and requested bundles are fetched.
   Up to six parts download at a time (configurable 1–8), streamed to disk with
   bounded write buffers. Completed pieces survive reloads.
-- The archive is already slim (`assetArchive.slim`), so the historical pruning
-  step below is skipped. Eager delivery remains default until a full game run
-  proves the lazy dependency set; `?assets=lazy` prioritizes requested bundles.
+- The rebuild in `community-build-slim.json` (`1,847,328,572` bytes, 111 parts,
+  art-preserving but with the mesh payloads zeroed and the cutscenes stubbed)
+  is **opt-in**: `?communityConfig=community-build-slim.json&assets=lazy`.
+  The default no longer uses it, because a game whose meshes and videos were
+  edited is not a usable control for a black-screen bug.
 - `zip.js` extracts requested bundles and verifies their CRC, surfacing failed
   reads in the page UI. Extracted output is cached within a quota-aware budget.
   The ZIP is never concatenated in RAM.
-- A cutscene request is answered with a ~600-byte blank container (the same
-  one `prepare-build.mjs` writes into a prepared build) instead of the real
-  video. The 26 streamed video payloads were stubbed in the rebuilt archive;
-  cutscenes therefore play as black frames. Audio payloads remain unchanged.
+- Cutscenes are served **for real**, exactly as the reference page serves them.
+  `?videos=placeholder` swaps them for the ~600-byte blank container (what the
+  slim archive already contains) on a metered connection.
+- Everything the ZIP does not contain — `catalog.bin`, `catalog.hash`,
+  `settings.json` and the loose `StreamingAssets/aa/WebGL/*.bundle` files such
+  as the menu scene — is fetched from `assetArchive.streamingBase` (GitHub raw).
+  The mount answers requests by path, so which host the URL names does not
+  matter for a bundle that is inside the ZIP.
 
 The first run therefore needs Wi-Fi, a normal (non-Private) Safari tab, and
-at least **1.72 GiB** of free storage for the eager archive, plus headroom for
+at least **1.94 GiB** of free storage for the eager archive, plus headroom for
 extracted bundles and Unity. Leave the tab in the foreground. GitHub rate
 limits unauthenticated downloads, so a download can be made to pause part-way
 through — the player waits it out and carries on rather than stopping; see

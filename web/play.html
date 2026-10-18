@@ -324,6 +324,12 @@
   var FALLBACK_BASE = '';
   var params = new URLSearchParams(location.search);
   var ASSET_BASE = params.get('base') || ''; // '' = same folder as this page
+  // ?stock=1 asks for parity with the upstream web-ports page: none of the
+  // runtime byte patches, no cutscene substitution, and Unity's own WebGL
+  // context/size defaults. It is the control experiment for a black screen
+  // — see web/REFERENCE-COMPARISON.md. It is never the default because the
+  // pinned build needs the heap patch to fit an iPad tab.
+  var STOCK_MODE = params.get('stock') === '1';
   var useRewriter = false;
   var BUILD_SOURCE = 'prepared';
   var COMMUNITY_BUILD = null;
@@ -340,8 +346,9 @@
    * `?wasmHeap=<MiB>` to pick another rung (1280, 1024), safe mode
    * asks for 1024 — while the 4080 MiB maximum stays untouched and
    * heap growth serves real demand. `?wasmPatch=0` turns the wasm
-   * patches off entirely, `?heapPatch=0` / `?unloadPatch=0` turn off
-   * one each, `?frameworkPatch=0` the audio patch, and
+   * patches off entirely, `?heapPatch=0` turns off the heap patch,
+   * `?frameworkPatch=0` the audio patch, `?unloadPatch=1` turns the
+   * (opt-in, heuristic) unload-assets gate on, and
    * `?bundleStream=0` returns bundle delivery to the old in-RAM Blob
    * path (streamed delivery is what keeps the first scene's bundles
    * out of the JS heap while Unity copies them into the wasm heap).
@@ -354,19 +361,24 @@
     return params.get('bundleStream') !== '0';
   }
   function communityPatchOptions() {
+    if (STOCK_MODE) return { heapMiB: 2048, heapPatch: false, unloadPatch: false, wasmPatches: false, frameworkPatch: false };
     return {
       heapMiB: wasmHeapMiB(),
       heapPatch: params.get('heapPatch') !== '0',
-      unloadPatch: params.get('unloadPatch') !== '0',
+      // Off by default. This is an 11-byte heuristic patch on an unverified
+      // wasm gate; it helps a long session's memory but it is a behaviour
+      // change the reference port does not make, so it is opt-in.
+      unloadPatch: params.get('unloadPatch') === '1',
       wasmPatches: params.get('wasmPatch') !== '0',
       frameworkPatch: params.get('frameworkPatch') !== '0',
     };
   }
   function communityPatchSummary() {
+    if (STOCK_MODE) return 'stock parity mode (?stock=1): no wasm/framework patches, published 2048 MiB heap, real cutscenes, Unity default WebGL context';
     var patch = communityPatchOptions();
     if (!patch.wasmPatches) return 'wasm patches off (?wasmPatch=0)';
     return 'initial wasm heap ' + (patch.heapPatch ? patch.heapMiB + ' MiB (published 2048, max 4080 untouched)' : 'as published (2048 MiB)') +
-      ', unload-assets gate ' + (patch.unloadPatch ? 'on' : 'off') +
+      ', unload-assets gate ' + (patch.unloadPatch ? 'on' : 'off (?unloadPatch=1 to enable)') +
       ', framework audio patch ' + (patch.frameworkPatch ? 'on' : 'off') +
       ', bundle delivery ' + (bundleStreaming() ? 'streamed' : 'in-RAM Blob (?bundleStream=0)');
   }
@@ -2073,7 +2085,11 @@
   // Esc / a long press can restore a pad hidden by physical input without
   // changing the saved preference.
   var padAutoHidden = false;
-  var compatMode = localStorage.getItem('sk.compat') === '1';
+  // ?compat=1 / ?compat=0 forces the setting for one load; otherwise the
+  // button's localStorage choice wins. Compatibility mode asks for a stencil
+  // buffer, which is the one context attribute that changes between runs.
+  var compatQuery = params.get('compat');
+  var compatMode = compatQuery === null ? localStorage.getItem('sk.compat') === '1' : compatQuery === '1';
   function isTouch() {
     return (navigator.maxTouchPoints || 0) > 0 || /iPad|iPhone|iPod|Android/i.test(navigator.userAgent);
   }
@@ -2774,7 +2790,13 @@
   // canvas, and the flight recorder's stage says exactly which side
   // of the first frame a kill landed on.
   var waitingForFirstFrame = false, firstFrameTimer = 0, bootFrameCount = 0;
-  var FIRST_FRAME_TIMEOUT_MS = 60000;
+  var firstFrameSlowReported = false;
+  // The overlay used to hide after 60 s even with zero frames drawn, which
+  // is how a slow first scene became "a black screen with no message". It
+  // now stays up with a live status line and only steps aside after ten
+  // minutes, so a genuinely stuck engine still cannot trap the player.
+  var FIRST_FRAME_SLOW_MS = 60000;
+  var FIRST_FRAME_TIMEOUT_MS = 600000;
 
   function finishBootOverlay(reason) {
     if (!waitingForFirstFrame) return;
@@ -2976,6 +2998,29 @@
   }
 
   function makeUnityConfig(dataUrl, codeUrl, frameworkUrl, streamingAssetsUrl) {
+    // Stock mode reproduces the upstream page's config exactly: the same four
+    // URLs and names, no heap hints (that binary ignores them anyway), no
+    // preRun guard, no canvas-size overrides and — most importantly — no
+    // webglContextAttributes object. Everything the upstream page relies on
+    // (the loader's <base href> and the browser's default context attributes)
+    // is then in play. postMainLoop/print/onAbort stay: they only observe.
+    if (STOCK_MODE) {
+      return {
+        dataUrl: dataUrl,
+        codeUrl: codeUrl,
+        frameworkUrl: frameworkUrl,
+        streamingAssetsUrl: streamingAssetsUrl,
+        // The upstream page's exact names: they key Unity's IndexedDB FS,
+        // PlayerPrefs and UnityCache, so changing them moves the game's saves.
+        companyName: 'EDUrocks Group, Truffled, GN-Math',
+        productName: 'Hollow Knight SilkSong',
+        productVersion: '1.0',
+        postMainLoop: function () { noteFrame(nowMs()); },
+        print: function (t) { log(t); },
+        printErr: function (t) { log('warn ' + t); },
+        onAbort: function (what) { surfaceEngineFailure(what == null ? 'unity abort' : String(what)); },
+      };
+    }
     return {
       dataUrl: dataUrl,
       codeUrl: codeUrl,
@@ -3033,10 +3078,12 @@
         // for WebKit to keep a copy of it around after the frame is
         // composited — that copy is pure video memory.
         preserveDrawingBuffer: false,
-        // Let the compositor take the frame as soon as it is drawn
-        // instead of queueing it: a late frame is worse than a dropped
-        // one, and the queue is memory the tab cannot spare.
-        desynchronized: true,
+        // Deliberately absent: `desynchronized`. The reference port does
+        // not ask for it, it changes how the frame reaches the compositor,
+        // and it has a history of producing a canvas that stays blank on
+        // some browser/GPU combinations. A black canvas is exactly the bug
+        // this port keeps chasing, so it is not worth the microseconds.
+        desynchronized: false,
         // A phone or tablet GPU is thermally throttled and shares its
         // memory with everything else on the device; asking for the
         // high-performance path there costs video memory for nothing.
@@ -3106,8 +3153,14 @@
       // Three released frames is an engine that is actually looping,
       // not a promise that resolved: that is the earliest honest
       // moment to call this screen the game.
-      if (frameCount - bootFrameCount >= 3) finishBootOverlay('frames');
-      else if (nowMs() - bootedAt >= FIRST_FRAME_TIMEOUT_MS) finishBootOverlay('timeout');
+      if (frameCount - bootFrameCount >= 3) { finishBootOverlay('frames'); return; }
+      var waited = nowMs() - bootedAt;
+      if (!firstFrameSlowReported && waited >= FIRST_FRAME_SLOW_MS) {
+        firstFrameSlowReported = true;
+        logError('no frame drawn ' + Math.round(waited / 1000) + 's after the engine reported ready — still loading the first scene (the overlay stays up so the screen is never a bare black canvas)');
+        setStatus('Still loading the first scene — big bundles take a while the first time…');
+      }
+      if (waited >= FIRST_FRAME_TIMEOUT_MS) finishBootOverlay('timeout');
     }, 200);
     // The pinned framework's Browser.updateCanvasDimensions strips the canvas
     // element's inline width/height during takeover. Put the display size back
@@ -3257,9 +3310,19 @@
     var startupController = new AbortController();
     var patchOptions = communityPatchOptions();
     log('runtime patches requested: ' + communityPatchSummary());
-    var startup = typeof SKUnityStartup !== 'undefined' ? SKUnityStartup.prepare(source, Object.assign({}, patchOptions, {
+    log('shell mode: ' + (STOCK_MODE ? 'stock parity (?stock=1) — upstream page behaviour' : 'iPad shell') +
+      ', cutscenes ' + (params.get('videos') === 'placeholder' ? 'answered with blank placeholders (?videos=placeholder)' : 'real, as the source ships them'));
+    var stockControls = STOCK_MODE ? {
+      // Parity with the upstream page: the stock loader, the stock framework,
+      // the stock config and its UnityCache defaults — nothing rewritten.
+      streaming: false, loaderPatch: false, cacheControl: false, frameworkPatch: false,
+    } : {};
+    var startup = typeof SKUnityStartup !== 'undefined' ? SKUnityStartup.prepare(source, Object.assign({}, patchOptions, stockControls, {
       base: ASSET_BASE, fetchImpl: window.fetch.bind(window), document: document,
-      streaming: params.get('streaming') !== '0', onLog: log, signal: startupController.signal,
+      streaming: !STOCK_MODE && params.get('streaming') !== '0',
+      loaderPatch: !STOCK_MODE && params.get('loaderPatch') !== '0',
+      cacheControl: !STOCK_MODE,
+      onLog: log, signal: startupController.signal,
     })) : Promise.resolve(null);
     // Attach a handler immediately; indexing may fail before this is awaited.
     startup.catch(function (error) { log('Unity preload failed: ' + error.message); });
@@ -3319,6 +3382,11 @@
         // mode can lower it with ?bundleCacheMB=; the default stays.
         bundleCacheBytes: Math.max(0, Math.min(params.has('bundleCacheMB') ? Number(params.get('bundleCacheMB')) || 0 : 512, 1024)) * 1048576,
         bundleBase: params.get('bundleBase') || source.assetArchive.bundleBase || '',
+        // Leave the cutscenes in the download. Pruning them is what the slim
+        // archive was for; with the reference archive the page now wants the
+        // same bytes the upstream page wants, cutscenes included. Opt in
+        // again with ?prune=1 (saves ~600 MB, stubs the cutscenes).
+        prune: params.get('prune') === '1',
         stream: SKStream,
         zip: window.zip,
         // GitHub hands out a limited number of files an hour to a page that is
@@ -3389,7 +3457,14 @@
         // while Unity copies it into its own — the duplication that
         // helped push this boot over the iPad's ceiling. Opt out with
         // ?bundleStream=0 only to A/B the old Blob path.
-        streamBundles: bundleStreaming(),
+        // Stock parity: upstream serves a fully extracted blob, so do not
+        // exercise the streaming writer in the control experiment.
+        streamBundles: !STOCK_MODE && bundleStreaming(),
+        // Real cutscenes are the default, exactly like the reference port.
+        // `?videos=placeholder` swaps them for the tiny blank containers
+        // (that is what the rebuilt archive in community-build-slim.json
+        // already contains), for a phone on a metered connection.
+        bypassVideos: params.get('videos') === 'placeholder',
         onAsset: function (name) {
           log('asset from local ZIP: ' + name);
           if (waitingForFirstFrame) setStatus('Loading the first scene…');
@@ -3428,12 +3503,29 @@
       });
       try { if (archiveSet && archiveSet.dispose) archiveSet.dispose(); } catch (e) {}
 
+      // Where Unity resolves StreamingAssets from. The mount answers every
+      // bundle the ZIP contains whatever host the URL names; everything else
+      // (catalog.bin/catalog.hash/settings.json and the menu bundles that were
+      // never inside the ZIP) is fetched from this root. It is separate from
+      // ASSET_BASE because jsDelivr refuses single files over ~20 MB and one
+      // of those loose bundles is 20.4 MB, while GitHub raw serves any blob
+      // under 100 MB. An explicit ?base=/?communityBase= still wins.
+      var streamingRoot = (params.get('base') || params.get('communityBase'))
+        ? ASSET_BASE
+        : (source.assetArchive.streamingBase || ASSET_BASE);
+      function streamingUrl(path) {
+        return String(streamingRoot).replace(/\/*$/, '/') + String(path).replace(/^\/+/, '');
+      }
+
       var dataUrl = abs(source.unity.data);
       var wasmUrl = abs(source.unity.wasm);
       var frameworkUrl = abs(source.unity.framework);
-      var streamingAssetsUrl = abs(source.unity.streamingAssets);
+      var streamingAssetsUrl = streamingUrl(source.unity.streamingAssets);
       var config = makeUnityConfig(dataUrl, wasmUrl, frameworkUrl, streamingAssetsUrl);
-      provideUpstreamBase(ASSET_BASE);
+      // The pinned loader ignores config.streamingAssetsUrl and asks the
+      // page's <base> instead (loader line 72), so the base has to name the
+      // same root the config does.
+      provideUpstreamBase(streamingRoot);
       await verifyPayloadMagics(dataUrl, wasmUrl);
       var instance = await instantiateUnity(abs(source.unity.loader), config, await startup);
       completeUnityBoot(instance, null, null);

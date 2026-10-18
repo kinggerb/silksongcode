@@ -41,10 +41,13 @@ just train --timesteps 200000 --run-name moss-mother-a
 
 ## 网页版 (iPad Safari)
 
-`web/` 是把游戏放进 iPad 浏览器的移植层。默认社区构建现在按需下载 ZIP 分片到 OPFS，
-不再等完整的 1.25 GB 归档下载完才启动 Unity；已下载分片和已提取资源会复用。
+`web/` 是把游戏放进 iPad 浏览器的移植层。**默认直接使用参考移植
+[web-ports/hollow-knight-silksong](https://github.com/web-ports/hollow-knight-silksong)
+的原始归档**（2,083,139,638 字节，100 个分片，网格/贴图/过场动画都未改动），
+按需下载 ZIP 分片到 OPFS，不再等完整归档下载完才启动 Unity；已下载分片和已提取资源会复用。
 加载器还修复了缓存被探测器清空、并发断点续传和 worker 退出超时，并将 Wasm 流式编译与资源准备并行。
-完整实现、回退开关和测试结果见 [web/LOADING-OPTIMIZATIONS.md](web/LOADING-OPTIMIZATIONS.md)。
+完整实现、回退开关和测试结果见 [web/LOADING-OPTIMIZATIONS.md](web/LOADING-OPTIMIZATIONS.md)；
+与参考移植逐项对比（以及之前黑屏的原因）见 [web/REFERENCE-COMPARISON.md](web/REFERENCE-COMPARISON.md)。
 三分钟内进入可操作游戏仍需目标 iPad 实测，不把小型测试结果当作完整游戏性能承诺。
 
 ```shell
@@ -57,12 +60,13 @@ node tools/make-fixture-build.mjs   # 造一份假构建, 用 demo.html 验证�
 ```
 
 页面默认使用 `web/community-build.json` 中固定版本的社区 WebGL 构建。游戏文件不会被复制进本仓库：
-Unity 入口文件从构建源 CDN 加载，完整 Addressables 归档为约 1.17 GiB；首次启动只下载所需资源覆盖的分片，
-之后随游戏进程继续缓存。建议 Wi-Fi、普通 Safari 标签页和至少约 2 GiB 可用存储（包括提取缓存）；
+Unity 入口文件从构建源 CDN 加载，Addressables 归档为参考移植的原始 1.94 GiB（100 个分片）；
+首次启动会把它们流式写入 OPFS。建议 Wi-Fi、普通 Safari 标签页和至少约 2.3 GiB 可用存储（包括提取缓存）；
+想省流量可用 `?communityConfig=community-build-slim.json`（1.76 GiB 的精简重建版，网格被清零、过场为占位）；
 具体来源、版本和限制见 `web/COMMUNITY-BUILD.md`。如果有本地或自托管的标准 Unity WebGL 构建，
 `web/play.html` 会优先使用它；准备与校验方法见 `web/BUILD.md`，实机使用与画质档位见 `web/IPAD.md`.
 
-首次下载途中可能被 GitHub 限流（未登录的 raw 下载按小时计数，而分片有 75 个），页面会
+首次下载途中可能被 GitHub 限流（未登录的 raw 下载按小时计数，而分片有 100 个），页面会
 自动等待并继续，已下载的分片不会丢；详见 `web/COMMUNITY-BUILD.md`。
 
 GitHub Pages 的仓库根地址 `https://kinggerb.github.io/silksongcode/` 由根目录的

@@ -12,461 +12,420 @@
     "streamingAssets": "StreamingAssets"
   },
   "assetArchive": {
-    "cacheKey": "webgl-assets-bcbe014-art-preserved-20261017.zip",
+    "cacheKey": "webgl-assets-bcbe014-original.zip",
     "previousCacheKeys": [
+      "webgl-assets-bcbe014-art-preserved-20261017.zip",
       "webgl-assets-bcbe014.zip"
     ],
-    "base": "https://raw.githubusercontent.com/kinggerb/silksongcode/a2c4553a3e40ee536672eabb39341856e0ba35ee/parts/",
-    "slim": true,
-    "total": 1847328572,
+    "base": "https://raw.githubusercontent.com/web-ports/hollow-knight-silksong/bcbe014765f2f6ca4b1d82ac25755a0299a600ab/StreamingAssets/aa/",
+    "mirror": "https://cdn.jsdelivr.net/gh/web-ports/hollow-knight-silksong@bcbe014765f2f6ca4b1d82ac25755a0299a600ab/StreamingAssets/aa/",
+    "slim": false,
+    "total": 2083139638,
     "mime": "application/zip",
     "parts": [
       {
         "path": "WebGL.zip.part1",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part2",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part3",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part4",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part5",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part6",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part7",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part8",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part9",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part10",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part11",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part12",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part13",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part14",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part15",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part16",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part17",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part18",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part19",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part20",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part21",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part22",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part23",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part24",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part25",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part26",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part27",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part28",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part29",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part30",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part31",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part32",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part33",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part34",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part35",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part36",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part37",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part38",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part39",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part40",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part41",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part42",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part43",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part44",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part45",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part46",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part47",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part48",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part49",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part50",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part51",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part52",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part53",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part54",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part55",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part56",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part57",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part58",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part59",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part60",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part61",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part62",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part63",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part64",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part65",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part66",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part67",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part68",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part69",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part70",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part71",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part72",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part73",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part74",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part75",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part76",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part77",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part78",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part79",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part80",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part81",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part82",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part83",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part84",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part85",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part86",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part87",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part88",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part89",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part90",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part91",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part92",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part93",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part94",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part95",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part96",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part97",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part98",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part99",
-        "bytes": 16777216
+        "bytes": 20866662
       },
       {
         "path": "WebGL.zip.part100",
-        "bytes": 16777216
-      },
-      {
-        "path": "WebGL.zip.part101",
-        "bytes": 16777216
-      },
-      {
-        "path": "WebGL.zip.part102",
-        "bytes": 16777216
-      },
-      {
-        "path": "WebGL.zip.part103",
-        "bytes": 16777216
-      },
-      {
-        "path": "WebGL.zip.part104",
-        "bytes": 16777216
-      },
-      {
-        "path": "WebGL.zip.part105",
-        "bytes": 16777216
-      },
-      {
-        "path": "WebGL.zip.part106",
-        "bytes": 16777216
-      },
-      {
-        "path": "WebGL.zip.part107",
-        "bytes": 16777216
-      },
-      {
-        "path": "WebGL.zip.part108",
-        "bytes": 16777216
-      },
-      {
-        "path": "WebGL.zip.part109",
-        "bytes": 16777216
-      },
-      {
-        "path": "WebGL.zip.part110",
-        "bytes": 16777216
-      },
-      {
-        "path": "WebGL.zip.part111",
-        "bytes": 1834812
+        "bytes": 17340100
       }
     ],
-    "mirror": "https://cdn.jsdelivr.net/gh/kinggerb/silksongcode@a2c4553a3e40ee536672eabb39341856e0ba35ee/parts/"
+    "note": "The reference port's original 2.08 GB Addressables ZIP, byte for byte. The rebuilt 1.76 GB archive lives in community-build-slim.json and is opt-in.",
+    "streamingBase": "https://raw.githubusercontent.com/web-ports/hollow-knight-silksong/bcbe014765f2f6ca4b1d82ac25755a0299a600ab/"
   },
   "fileBytes": {
     "loader": 118453,
