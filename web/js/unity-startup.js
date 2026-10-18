@@ -369,6 +369,7 @@
       link.href = urls[key]; link.crossOrigin = 'anonymous'; doc.head.appendChild(link);
     });
     var runtime = { loaderUrl: urls.loader, configure: function (config) {
+      if (options.cacheControl === false) return;
       // Pinned immutable URLs do not need a round trip to revalidate on every boot.
       config.cacheControl = function (url) {
         // The OPFS layer already owns bundles. UnityCache would clone and store
@@ -404,6 +405,7 @@
             return null;
           });
       var result = await Promise.all([
+        options.loaderPatch === false ? Promise.resolve(null) :
         fetchImpl(urls.loader, { cache: 'force-cache', signal: controller.signal }).then(async function (res) {
           if (!res.ok) throw new Error('loader HTTP ' + res.status);
           var bytes = await res.arrayBuffer();
@@ -417,7 +419,7 @@
         frameworkReady,
       ]);
       compiled = result[1];
-      objectUrl = URL.createObjectURL(new Blob([result[0]], { type: 'text/javascript' }));
+      if (result[0]) objectUrl = URL.createObjectURL(new Blob([result[0]], { type: 'text/javascript' }));
       if (result[2]) frameworkUrl = URL.createObjectURL(new Blob([result[2]], { type: 'text/javascript' }));
       var fail;
       runtime.failed = new Promise(function (_, reject) { fail = reject; });
@@ -431,11 +433,11 @@
           return {};
         };
       };
-      runtime.loaderUrl = objectUrl;
+      if (objectUrl) runtime.loaderUrl = objectUrl;
       runtime.wasmPatchReport = patchReport;
       runtime.dispose = function () {
         compiled = null;
-        URL.revokeObjectURL(objectUrl);
+        if (objectUrl) URL.revokeObjectURL(objectUrl);
         if (frameworkUrl) URL.revokeObjectURL(frameworkUrl);
       };
       if (patchReport) patchReport.patches.forEach(function (p) {

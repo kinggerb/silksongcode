@@ -50,7 +50,7 @@
       throw fail('community build configuration has an invalid asset archive mirror');
     }
 
-    ['bundleBase', 'index'].forEach(function (field) {
+    ['bundleBase', 'index', 'streamingBase'].forEach(function (field) {
       if (archive[field] !== undefined && (typeof archive[field] !== 'string' || !archive[field])) throw fail('invalid asset archive ' + field);
     });
     var total = 0;

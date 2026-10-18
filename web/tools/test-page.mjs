@@ -179,7 +179,10 @@ await test('the WebGL context is configured for a phone, not for a workstation',
   const win = bootPage();
   const attributes = win.SKPerf.internals().makeUnityConfig('d', 'c', 'f', 'a').webglContextAttributes;
   eq(attributes.preserveDrawingBuffer, false, 'the drawing buffer is not kept around');
-  eq(attributes.desynchronized, true, 'late frames are dropped instead of queued');
+  // `desynchronized` is deliberately not requested: it is a compositor hint
+  // the reference port never uses and it has produced blank canvases.
+  eq(attributes.desynchronized, false, 'no desynchronized compositor hint');
+  eq(attributes.preserveDrawingBuffer, false, 'and no retained drawing buffer');
   eq(attributes.powerPreference, 'low-power', 'a touch device asks for the low-power GPU');
   eq(attributes.antialias, false, 'no multisampling');
   win.close();
@@ -289,7 +292,7 @@ await test('the pinned community source enables Start and warns about its first-
   const win = bootPage({ fetchImpl });
   await new Promise((resolve) => setTimeout(resolve, 0));
   eq(win.document.getElementById('startBtn').disabled, false, 'community build can start');
-  ok(/1761\.7 MB/.test(win.document.getElementById('sub').textContent), 'first-run archive size is shown');
+  ok(/1986\.6 MB/.test(win.document.getElementById('sub').textContent), 'first-run archive size is shown');
   eq(win.SKPerf.internals().buildSource(), 'community', 'the community adapter is selected');
   ok(/cdn\.jsdelivr\.net/.test(win.SKPerf.internals().assetBase()), 'the build source uses the pinned CDN base');
   win.close();
@@ -373,7 +376,7 @@ await test('the community loader finds the <base> it was written for, and the pa
   eq(failure(), '', 'the start failed with');
   ok(win.unityInstance, 'Unity was started');
   eq(openedModes.join(','), 'eager', 'the default community archive mode is eager');
-  const expected = source.base + 'StreamingAssets';
+  const expected = (source.assetArchive.streamingBase || source.base) + 'StreamingAssets';
   eq(win.__upstream.seen, expected, 'the loader derived StreamingAssets from the community asset root');
   eq(win.__upstream.passed, expected, 'which is the URL the page passes in the config anyway');
   eq(win.__upstream.laterError, null, 'a later read of the <base> does not throw either');
@@ -393,10 +396,13 @@ await test('lazy archive loading requires ?assets=lazy', async () => {
   const source = JSON.parse(fs.readFileSync(path.join(WEB, 'community-build.json'), 'utf8'));
   const fetchImpl = async (url) => {
     const clean = String(url).replace(/^https?:\/\/[^/]+\//, '');
-    if (clean === 'community-build.json') return { ok: true, status: 200, json: async () => source };
+    if (clean === 'community-build-slim.json') {
+      const slim = JSON.parse(fs.readFileSync(path.join(WEB, 'community-build-slim.json'), 'utf8'));
+      return { ok: true, status: 200, json: async () => slim };
+    }
     return { ok: false, status: 404, headers: new Map(), text: async () => '' };
   };
-  const win = bootPage({ fetchImpl, query: '?assets=lazy' });
+  const win = bootPage({ fetchImpl, query: '?assets=lazy&communityConfig=community-build-slim.json' });
   await new Promise((resolve) => setTimeout(resolve, 0));
   win.SKStream.detect = async () => ({ opfs: true, available: 4e9, quota: 5e9, usage: 0, secure: true });
   let lazySelected = false;
@@ -420,11 +426,11 @@ await test('lazy archive loading requires ?assets=lazy', async () => {
  * state the reported iPad failure happened in. `arm` runs inside the page
  * right before Start is clicked, so a failure can be planted that only
  * fires once the boot is under way. */
-async function bootToUnity({ arm, expectFailure = false, query = '' } = {}) {
-  const source = JSON.parse(fs.readFileSync(path.join(WEB, 'community-build.json'), 'utf8'));
+async function bootToUnity({ arm, expectFailure = false, query = '', descriptor = 'community-build.json' } = {}) {
+  const source = JSON.parse(fs.readFileSync(path.join(WEB, descriptor), 'utf8'));
   const fetchImpl = async (url) => {
     const clean = String(url).replace(/^https?:\/\/[^/]+\//, '');
-    if (clean === 'community-build.json') return { ok: true, status: 200, json: async () => source };
+    if (clean === descriptor) return { ok: true, status: 200, json: async () => source };
     return { ok: false, status: 404, headers: new Map(), text: async () => '' };
   };
   const win = bootPage({ fetchImpl, query });
@@ -471,7 +477,8 @@ function pumpFrames(win, tick = 34) {
 await test('a failed lazy ZIP part produces a visible bundle error', async () => {
   const bundle = 'aa/WebGL/packed-lazy.bundle';
   const win = await bootToUnity({
-    query: '?assets=lazy',
+    query: '?assets=lazy&communityConfig=community-build-slim.json',
+    descriptor: 'community-build-slim.json',
     arm(next) {
       next.SKCommunityBuild.openLazyArchive = async () => ({
         entryCount: 1,
@@ -989,18 +996,18 @@ await test('the runtime patch settings are readable and follow the query switche
   const settings = win.SKPerf.settings();
   eq(settings.wasmHeapMiB, 1536, 'the default initial heap is 1536 MiB, not the published 2048');
   eq(settings.bundleStreaming, true, 'bundles stream by default');
-  eq(settings.patchOptions.unloadPatch, true, 'the unload gate patch is on by default');
+  eq(settings.patchOptions.unloadPatch, false, 'the heuristic unload gate patch is opt-in');
   eq(settings.patchOptions.frameworkPatch, true, 'the framework audio patch is on by default');
   const summary = win.SKPerf.internals().communityPatchSummary();
   ok(summary.includes('1536 MiB'), 'the summary says which heap will be declared: ' + summary);
   ok(summary.includes('streamed'), 'and how bundles are delivered');
   win.close();
 
-  const opted = bootPage({ query: '?wasmHeap=1024&bundleStream=0&unloadPatch=0&frameworkPatch=0' });
+  const opted = bootPage({ query: '?wasmHeap=1024&bundleStream=0&unloadPatch=1&frameworkPatch=0' });
   const optedSettings = opted.SKPerf.settings();
   eq(optedSettings.wasmHeapMiB, 1024, '?wasmHeap picks the ladder rung');
   eq(optedSettings.bundleStreaming, false, '?bundleStream=0 returns to the Blob path');
-  eq(optedSettings.patchOptions.unloadPatch, false, '?unloadPatch=0 kept');
+  eq(optedSettings.patchOptions.unloadPatch, true, '?unloadPatch=1 turns the unload gate on');
   eq(optedSettings.patchOptions.frameworkPatch, false, '?frameworkPatch=0 kept');
   opted.close();
 

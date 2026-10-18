@@ -12,13 +12,26 @@ const require = createRequire(import.meta.url);
 const community = require('../js/community-build.js');
 const stream = require('../js/stream.js');
 const zip = require('../js/zip.min.js');
-const source = JSON.parse(fs.readFileSync(path.join(WEB, 'community-build.json'), 'utf8'));
+// Two descriptors ship with the page. `community-build.json` is the
+// default and points at the reference port's own archive, byte for byte;
+// `community-build-slim.json` is the rebuilt one, kept for a phone on a
+// metered connection and for the rebuild pipeline. Most of this suite
+// exercises the descriptor mechanics, so it uses the slim one (it is the
+// smaller fixture and keeps every part-count assertion meaningful), and
+// the default is pinned separately below.
+const source = JSON.parse(fs.readFileSync(path.join(WEB, 'community-build-slim.json'), 'utf8'));
+const upstreamSource = JSON.parse(fs.readFileSync(path.join(WEB, 'community-build.json'), 'utf8'));
 
 // The commit the art-preserving archive was published from, pinned by the
 // descriptor instead of relying on the mutable `art-preserved-20261017` tag.
 const PIN = 'a2c4553a3e40ee536672eabb39341856e0ba35ee';
 const RAW_BASE = 'https://raw.githubusercontent.com/kinggerb/silksongcode/' + PIN + '/parts/';
 const MIRROR_BASE = 'https://cdn.jsdelivr.net/gh/kinggerb/silksongcode@' + PIN + '/parts/';
+// …and the reference port's archive, which the default descriptor serves.
+const UPSTREAM_PIN = 'bcbe014765f2f6ca4b1d82ac25755a0299a600ab';
+const UPSTREAM_BASE = 'https://cdn.jsdelivr.net/gh/web-ports/hollow-knight-silksong@' + UPSTREAM_PIN + '/';
+const UPSTREAM_RAW = 'https://raw.githubusercontent.com/web-ports/hollow-knight-silksong/' + UPSTREAM_PIN + '/StreamingAssets/aa/';
+const UPSTREAM_MIRROR = 'https://cdn.jsdelivr.net/gh/web-ports/hollow-knight-silksong@' + UPSTREAM_PIN + '/StreamingAssets/aa/';
 
 /**
  * A fetch stub that answers per host and records every request. A verdict is
@@ -76,6 +89,37 @@ function fakeDiskSink() {
 const hostCount = (stub, host) => stub.requests.filter((r) => new URL(r.url).host === host).length;
 
 section('source descriptor');
+
+await test('the default archive is the reference port\'s own, unmodified ZIP', () => {
+  // The page boots what the reference boots. This is the whole point: the
+  // black screen was chased against a rebuilt archive whose meshes and
+  // cutscenes had been edited; the default is now the original bytes.
+  eq(community.validate(upstreamSource), upstreamSource, 'valid configuration returned');
+  eq(upstreamSource.commit, UPSTREAM_PIN, 'source commit pinned');
+  eq(upstreamSource.buildId, 'web-ports-silksong-bcbe014', 'build id names the reference build');
+  eq(upstreamSource.assetArchive.parts.length, 100, 'the reference archive is 100 parts');
+  eq(upstreamSource.assetArchive.total, 2083139638, 'exactly the reference ZIP size');
+  eq(upstreamSource.assetArchive.parts.at(-1).bytes, 17340100, 'last part is the reference tail');
+  eq(upstreamSource.assetArchive.slim, false, 'nothing was left out of it');
+  eq(upstreamSource.assetArchive.base, UPSTREAM_RAW, 'served from GitHub raw');
+  eq(upstreamSource.assetArchive.mirror, UPSTREAM_MIRROR, 'with jsDelivr as the mirror');
+  eq(upstreamSource.base, UPSTREAM_BASE, 'the Unity build files come from the same pinned commit');
+  eq(community.parts(upstreamSource)[0].url, UPSTREAM_RAW + 'WebGL.zip.part1', 'part 1 resolves');
+  // StreamingAssets has its own host: jsDelivr refuses single files near
+  // 20 MB and one loose menu/audio bundle is 20.4 MB, while raw serves any
+  // blob under 100 MB. The loader derives StreamingAssets from the page's
+  // <base>, so the two have to agree.
+  eq(upstreamSource.assetArchive.streamingBase, 'https://raw.githubusercontent.com/web-ports/hollow-knight-silksong/' + UPSTREAM_PIN + '/',
+    'StreamingAssets comes from GitHub raw');
+  eq(new URL('StreamingAssets', upstreamSource.assetArchive.streamingBase).href,
+    'https://raw.githubusercontent.com/web-ports/hollow-knight-silksong/' + UPSTREAM_PIN + '/StreamingAssets',
+    'and resolves to the one StreamingAssets root the config passes');
+  eq(
+    upstreamSource.assetArchive.previousCacheKeys.includes('webgl-assets-bcbe014-art-preserved-20261017.zip'),
+    true,
+    'the rebuilt archive\'s cache is retired, so a previous visitor downloads the real one'
+  );
+});
 
 await test('the pinned community source has a consistent resumable archive plan', () => {
   eq(community.validate(source), source, 'valid configuration returned');
@@ -1007,6 +1051,108 @@ await test('the placeholder is the same container the build pipeline writes', as
   eq(Buffer.from(webm).equals(makePlaceholderVideo('webm')), true, 'and so is the WebM');
   ok(mp4.length < 2048, 'the MP4 placeholder is a few hundred bytes (' + mp4.length + ')');
   ok(webm.length < 2048, 'and so is the WebM one (' + webm.length + ')');
+});
+
+/* ------------------------------------------------------------------ *
+ * The default archive, end to end
+ *
+ * The 21 file names below are the real central directory of the
+ * reference port's StreamingAssets/aa/WebGL.zip at the pinned commit
+ * (2,083,139,638 bytes, 21 entries, central directory at 2,083,136,364).
+ * They are what the page's fetch mount is asked for once Addressables
+ * starts: the catalog names 162 bundles, 21 of which live here and the
+ * other 141 are loose files on the StreamingAssets host.
+ * ------------------------------------------------------------------ */
+const REAL_BUNDLES = [
+  'packed-audio-voices_assets_all_4e4d5ad29d42bd4abdd5eadfce410be2.bundle',
+  'packed-sprites-effects_assets_all_2e7bed7c909427b371b79d647bf138ee.bundle',
+  'packed-scenes-hornet_scenes_all_c907e217c56bc36e9412cc713b6511b0.bundle',
+  'packed-collections_assets_all_40fc2899a4bf13e2fdf4877fac117bfe.bundle',
+  'packed-cinematics_assets_all_5ec2ac5cfb98b69438cb91f6e253bbbc.bundle',
+  'packed-sprites-scenery_assets_all_39cc8fd6577083e676edf1e1a61fcaa9.bundle',
+  'packed-audio-hornetmusic_assets_all_d7258aa531c7adbb862ab1f75c0a4758.bundle',
+  'packed-prefabs_assets_all_b19c0cf6b825f4cf18264a6c8f5765a6.bundle',
+  'packed-animations-props_assets_all_4d32c5a2554f1011290a2a758b19c15d.bundle',
+  'packed-sprites-ui_assets_all_f9a8ef56ecdd0a4b95785438aefb0b1a.bundle',
+  'packed-audio-hornetvoices_assets_all_6253ed781850c4087eb825002e1b63a0.bundle',
+  'packed-audio-sfx_assets_all_64a9c47145f1a68e9023751b5a4c32dd.bundle',
+  'packed-animations-hornet_assets_all_df96eceebcc563fac0a4c4d756348ec8.bundle',
+  'packed-fonts_assets_all_80af17da7b187150e3e4ec5346115b67.bundle',
+  'packed-sprites-hero_assets_all_038a432da5e4c2c15b9327d215fd7f32.bundle',
+  'packed-sprites-hornet_bosses_assets_all_4e40e4fa5157ac9fa9cbb2b12d9205fd.bundle',
+  'packed-animations-hornetnpcs_assets_all_b07b6c9740de43a1fa7c0ceef545d3a9.bundle',
+  'packed-animations-hornetenemies_assets_all_9f3d5906ad5a54b6c762e508aea802c3.bundle',
+  'packed-animations-effects_assets_all_9aab0f3b6b8f8c05cd2d618598948eea.bundle',
+  'packed-sprites-hornet_enemies_assets_all_1dc5e3e9aee3b4d2599cfacc771aa715.bundle',
+  'packed-animations-cutscene_assets_all_6088ab681e63b034a1b602249209347d.bundle',
+];
+
+function crc32(buf) {
+  let c, crc = 0xffffffff;
+  for (let i = 0; i < buf.length; i++) {
+    c = (crc ^ buf[i]) & 0xff;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    crc = (crc >>> 8) ^ c;
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+/** A minimal STORED (uncompressed) ZIP, enough for zip.js to index. */
+function storedZip(files) {
+  const locals = [];
+  const centrals = [];
+  let offset = 0;
+  for (const [name, data] of files) {
+    const nameBytes = Buffer.from(name);
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0); local.writeUInt16LE(20, 4); local.writeUInt16LE(0, 6);
+    local.writeUInt16LE(0, 8); local.writeUInt32LE(crc32(data), 14);
+    local.writeUInt32LE(data.length, 18); local.writeUInt32LE(data.length, 22);
+    local.writeUInt16LE(nameBytes.length, 26);
+    const central = Buffer.alloc(46);
+    central.writeUInt32LE(0x02014b50, 0); central.writeUInt16LE(20, 4); central.writeUInt16LE(20, 6);
+    central.writeUInt16LE(0, 8); central.writeUInt32LE(crc32(data), 16);
+    central.writeUInt32LE(data.length, 20); central.writeUInt32LE(data.length, 24);
+    central.writeUInt16LE(nameBytes.length, 28); central.writeUInt32LE(offset, 42);
+    locals.push(local, nameBytes, data);
+    centrals.push(central, nameBytes);
+    offset += 30 + nameBytes.length + data.length;
+  }
+  const cd = Buffer.concat(centrals);
+  const eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(0x06054b50, 0);
+  eocd.writeUInt16LE(files.length, 8); eocd.writeUInt16LE(files.length, 10);
+  eocd.writeUInt32LE(cd.length, 12); eocd.writeUInt32LE(offset, 16);
+  return Buffer.concat([...locals, cd, eocd]);
+}
+
+await test('every bundle the reference archive contains is answered from it, and nothing else is', async () => {
+  const payloads = REAL_BUNDLES.map((name, i) => [name, Buffer.from('bundle-payload-' + i)]);
+  const bytes = storedZip(payloads);
+  const mount = await community.openArchive(new Blob([bytes]), zip, {});
+  eq(mount.entryCount, REAL_BUNDLES.length, 'all 21 entries indexed');
+  const network = [];
+  const target = {
+    fetch: async (url) => { network.push(String(url)); return new Response('from-network', { status: 200 }); },
+  };
+  const restore = community.installFetchMount(target, mount, { streamBundles: false, bypassVideos: false });
+  const root = 'https://raw.githubusercontent.com/web-ports/hollow-knight-silksong/' + UPSTREAM_PIN + '/StreamingAssets/';
+  // Addressables asks for each bundle under aa/WebGL/, exactly like the real game.
+  for (let i = 0; i < REAL_BUNDLES.length; i++) {
+    const res = await target.fetch(root + 'aa/WebGL/' + REAL_BUNDLES[i]);
+    eq(res.status, 200, REAL_BUNDLES[i].slice(0, 40) + ': served from the ZIP');
+    eq(await res.text(), 'bundle-payload-' + i, 'with that entry\'s bytes');
+  }
+  eq(network.length, 0, 'no bundle in the archive ever reaches the network');
+  // The menu bundle and the catalog are loose files; they must fall through.
+  const menu = 'packed-scenes-menu_title_scenes_all_ca92c585bc287234740cb53ded3c68d5.bundle';
+  eq((await target.fetch(root + 'aa/WebGL/' + menu)).status, 200, 'a loose menu bundle is fetched from the host');
+  eq((await target.fetch(root + 'aa/catalog.bin')).status, 200, 'so is the catalog');
+  eq((await target.fetch(root + 'aa/catalog.hash')).status, 200, 'and its hash');
+  eq((await target.fetch(root + 'aa/settings.json')).status, 200, 'and the Addressables settings');
+  eq(network.length, 4, 'exactly the four files the ZIP cannot answer');
+  restore();
+  await mount.close();
 });
 
 await done('community build tests');
